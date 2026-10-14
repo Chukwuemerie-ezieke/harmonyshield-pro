@@ -1,9 +1,72 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import { z } from "zod";
 import { storage } from "./storage";
 import { hashPassword, verifyPassword, generateToken, verifyToken, authMiddleware } from "./auth";
+import { requireRole, verifyOwnership } from "./authz";
+import { validateBody } from "./validate";
 import { fetchLiveNews, fetchOTXThreats, checkIPReputation, getFeedStatus } from "./live-feeds";
 import { authLimiter } from "./rate-limit";
+import {
+  insertIncidentSchema,
+  insertIncidentActionSchema,
+  insertComplianceItemSchema,
+  insertSchoolSchema,
+} from "@shared/schema";
+
+// ─── Request body schemas ────────────────────────────
+// These derive from the drizzle-zod insert schemas in shared/schema.ts but
+// drop server-controlled fields so clients can never set id, schoolId,
+// ownership, or audit timestamps. The server injects those from the
+// authenticated session.
+
+const allowedUserRoles = ["admin", "dpo", "staff", "teacher"] as const;
+
+// POST /api/incidents - client supplies incident details; server injects
+// schoolId and createdAt. reportedBy stays client-supplied (display name).
+const createIncidentSchema = insertIncidentSchema.omit({
+  schoolId: true,
+  createdAt: true,
+});
+
+// PUT /api/incidents/:id - partial update of the client-editable subset.
+const updateIncidentSchema = createIncidentSchema.partial();
+
+// PUT /api/compliance/:id - partial update; schoolId/itemKey are not client
+// editable through this route.
+const updateComplianceSchema = insertComplianceItemSchema
+  .omit({ schoolId: true, itemKey: true, updatedAt: true })
+  .partial();
+
+// POST /api/incidents/:id/actions - server injects incidentId and createdAt.
+const createIncidentActionSchema = insertIncidentActionSchema.omit({
+  incidentId: true,
+  createdAt: true,
+});
+
+// PUT /api/incident-actions/:id - partial update of an action.
+const updateIncidentActionSchema = createIncidentActionSchema.partial();
+
+// POST /api/training/progress - progress is always scoped to the current user.
+const trainingProgressSchema = z.object({
+  courseId: z.number().int().positive(),
+  status: z.string().min(1),
+  score: z.number().int().min(0).max(100).optional(),
+});
+
+// PUT /api/settings - a school admin may edit their own school's details.
+const updateSettingsSchema = insertSchoolSchema.partial();
+
+// POST /api/auth/register - admin-only. The creating admin's schoolId is
+// forced server-side; role is constrained to a safe allowlist and defaults to
+// "staff". Clients can never choose id/schoolId.
+const registerSchema = z.object({
+  name: z.string().min(1),
+  email: z.string().email(),
+  password: z.string().min(6),
+  role: z.enum(allowedUserRoles).optional(),
+  department: z.string().optional(),
+});
 
 async function seedDatabase() {
   // Check if already seeded
@@ -520,36 +583,46 @@ export async function registerRoutes(
     }
   });
 
-  // ─── Auth: Register ────────────────────────────────
-  app.post("/api/auth/register", authLimiter, async (req, res) => {
-    try {
-      const { name, email, password, schoolId, role } = req.body;
-      if (!name || !email || !password) {
-        return res.status(400).json({ message: "Name, email, and password are required" });
+  // ─── Auth: Register (admin-only) ───────────────────
+  // Locked down: only an authenticated admin may create users, and new users
+  // are always created WITHIN the admin's own school. The request body cannot
+  // choose schoolId at all, and role is constrained to a safe allowlist
+  // (defaulting to "staff"). This closes the previous hole where any
+  // unauthenticated caller could self-assign role="admin" and an arbitrary
+  // schoolId. Login and the seeded demo users are unaffected.
+  app.post(
+    "/api/auth/register",
+    authLimiter,
+    authMiddleware,
+    requireRole("admin"),
+    validateBody(registerSchema),
+    async (req, res) => {
+      try {
+        const { name, email, password, role, department } = req.body;
+
+        const existing = await storage.getUserByEmail(email);
+        if (existing) {
+          return res.status(409).json({ message: "Email already registered" });
+        }
+
+        const hashedPw = await hashPassword(password);
+        const user = await storage.createUser({
+          name,
+          email,
+          password: hashedPw,
+          department,
+          schoolId: req.user!.schoolId, // forced to the creating admin's school
+          role: role || "staff",
+        });
+
+        const { password: _, ...userData } = user;
+        return res.status(201).json({ user: userData });
+      } catch (err) {
+        console.error("Register error:", err);
+        return res.status(500).json({ message: "Internal server error" });
       }
-
-      const existing = await storage.getUserByEmail(email);
-      if (existing) {
-        return res.status(409).json({ message: "Email already registered" });
-      }
-
-      const hashedPw = await hashPassword(password);
-      const user = await storage.createUser({
-        name,
-        email,
-        password: hashedPw,
-        schoolId: schoolId || 1,
-        role: role || "staff",
-      });
-
-      const token = generateToken(user.id, user.email, user.schoolId, user.role);
-      const { password: _, ...userData } = user;
-      return res.json({ token, user: userData });
-    } catch (err) {
-      console.error("Register error:", err);
-      return res.status(500).json({ message: "Internal server error" });
-    }
-  });
+    },
+  );
 
   // ─── Auth: Get Current User ────────────────────────
   app.get("/api/auth/me", async (req, res) => {
@@ -589,7 +662,14 @@ export async function registerRoutes(
   });
 
   app.get("/api/schools/:id", authMiddleware, async (req, res) => {
-    const school = await storage.getSchool(Number(req.params.id));
+    const id = Number(req.params.id);
+    // A user may only read the full details of their own school. Schools own
+    // record uses `id` as the ownership key (there is no `schoolId` column), so
+    // we check it directly rather than via verifyOwnership.
+    if (id !== req.user!.schoolId) {
+      return res.status(403).json({ message: "You do not have access to this resource" });
+    }
+    const school = await storage.getSchool(id);
     if (!school) return res.status(404).json({ message: "School not found" });
     return res.json(school);
   });
@@ -601,21 +681,36 @@ export async function registerRoutes(
     return res.json({ items, score });
   });
 
-  app.put("/api/compliance/:id", authMiddleware, async (req, res) => {
-    const updated = await storage.updateComplianceItem(Number(req.params.id), req.body);
-    if (!updated) return res.status(404).json({ message: "Item not found" });
+  app.put(
+    "/api/compliance/:id",
+    authMiddleware,
+    requireRole("admin", "dpo"),
+    validateBody(updateComplianceSchema),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const owned = await verifyOwnership(
+        req,
+        res,
+        () => storage.getComplianceItem(id),
+        "Item not found",
+      );
+      if (!owned) return;
 
-    await storage.createAuditEntry({
-      schoolId: req.user!.schoolId,
-      userId: req.user!.id,
-      action: "compliance_update",
-      entityType: "compliance",
-      entityId: Number(req.params.id),
-      details: `Updated status to ${req.body.status}`,
-    });
+      const updated = await storage.updateComplianceItem(id, req.body);
+      if (!updated) return res.status(404).json({ message: "Item not found" });
 
-    return res.json(updated);
-  });
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "compliance_update",
+        entityType: "compliance",
+        entityId: id,
+        details: `Updated status to ${req.body.status ?? "modified"}`,
+      });
+
+      return res.json(updated);
+    },
+  );
 
   // ─── Threats ───────────────────────────────────────
   app.get("/api/threats", authMiddleware, async (_req, res) => {
@@ -656,60 +751,123 @@ export async function registerRoutes(
   });
 
   app.get("/api/incidents/:id", authMiddleware, async (req, res) => {
-    const incident = await storage.getIncident(Number(req.params.id));
-    if (!incident) return res.status(404).json({ message: "Incident not found" });
+    const id = Number(req.params.id);
+    const incident = await verifyOwnership(
+      req,
+      res,
+      () => storage.getIncident(id),
+      "Incident not found",
+    );
+    if (!incident) return;
+
     const actions = await storage.getIncidentActions(incident.id);
     return res.json({ ...incident, actions });
   });
 
-  app.post("/api/incidents", authMiddleware, async (req, res) => {
-    const incident = await storage.createIncident({
-      ...req.body,
-      schoolId: req.user!.schoolId,
-    });
+  app.post(
+    "/api/incidents",
+    authMiddleware,
+    requireRole("admin", "dpo", "staff", "teacher"),
+    validateBody(createIncidentSchema),
+    async (req, res) => {
+      const incident = await storage.createIncident({
+        ...req.body,
+        schoolId: req.user!.schoolId, // server-injected ownership
+      });
 
-    await storage.createAuditEntry({
-      schoolId: req.user!.schoolId,
-      userId: req.user!.id,
-      action: "incident_created",
-      entityType: "incident",
-      entityId: incident.id,
-      details: `New ${incident.type} incident reported`,
-    });
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "incident_created",
+        entityType: "incident",
+        entityId: incident.id,
+        details: `New ${incident.type} incident reported`,
+      });
 
-    return res.json(incident);
-  });
+      return res.status(201).json(incident);
+    },
+  );
 
-  app.put("/api/incidents/:id", authMiddleware, async (req, res) => {
-    const updated = await storage.updateIncident(Number(req.params.id), req.body);
-    if (!updated) return res.status(404).json({ message: "Incident not found" });
+  app.put(
+    "/api/incidents/:id",
+    authMiddleware,
+    requireRole("admin", "dpo", "staff", "teacher"),
+    validateBody(updateIncidentSchema),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const owned = await verifyOwnership(
+        req,
+        res,
+        () => storage.getIncident(id),
+        "Incident not found",
+      );
+      if (!owned) return;
 
-    await storage.createAuditEntry({
-      schoolId: req.user!.schoolId,
-      userId: req.user!.id,
-      action: "incident_updated",
-      entityType: "incident",
-      entityId: Number(req.params.id),
-      details: `Updated incident status to ${req.body.status || 'modified'}`,
-    });
+      const updated = await storage.updateIncident(id, req.body);
+      if (!updated) return res.status(404).json({ message: "Incident not found" });
 
-    return res.json(updated);
-  });
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "incident_updated",
+        entityType: "incident",
+        entityId: id,
+        details: `Updated incident status to ${req.body.status || "modified"}`,
+      });
+
+      return res.json(updated);
+    },
+  );
 
   // ─── Incident Actions ──────────────────────────────
-  app.post("/api/incidents/:id/actions", authMiddleware, async (req, res) => {
-    const action = await storage.createIncidentAction({
-      ...req.body,
-      incidentId: Number(req.params.id),
-    });
-    return res.json(action);
-  });
+  app.post(
+    "/api/incidents/:id/actions",
+    authMiddleware,
+    requireRole("admin", "dpo", "staff", "teacher"),
+    validateBody(createIncidentActionSchema),
+    async (req, res) => {
+      const incidentId = Number(req.params.id);
+      // Ownership flows through the parent incident's schoolId.
+      const incident = await verifyOwnership(
+        req,
+        res,
+        () => storage.getIncident(incidentId),
+        "Incident not found",
+      );
+      if (!incident) return;
 
-  app.put("/api/incident-actions/:id", authMiddleware, async (req, res) => {
-    const updated = await storage.updateIncidentAction(Number(req.params.id), req.body);
-    if (!updated) return res.status(404).json({ message: "Action not found" });
-    return res.json(updated);
-  });
+      const action = await storage.createIncidentAction({
+        ...req.body,
+        incidentId,
+      });
+      return res.status(201).json(action);
+    },
+  );
+
+  app.put(
+    "/api/incident-actions/:id",
+    authMiddleware,
+    requireRole("admin", "dpo", "staff", "teacher"),
+    validateBody(updateIncidentActionSchema),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      // Resolve the action, then its parent incident, to check ownership.
+      const action = await storage.getIncidentAction(id);
+      if (!action) return res.status(404).json({ message: "Action not found" });
+
+      const incident = await verifyOwnership(
+        req,
+        res,
+        () => storage.getIncident(action.incidentId),
+        "Action not found",
+      );
+      if (!incident) return;
+
+      const updated = await storage.updateIncidentAction(id, req.body);
+      if (!updated) return res.status(404).json({ message: "Action not found" });
+      return res.json(updated);
+    },
+  );
 
   // ─── Training ──────────────────────────────────────
   app.get("/api/training/courses", authMiddleware, async (_req, res) => {
@@ -726,7 +884,11 @@ export async function registerRoutes(
     return res.json(await storage.getTrainingProgress(req.user!.id));
   });
 
-  app.post("/api/training/progress", authMiddleware, async (req, res) => {
+  app.post(
+    "/api/training/progress",
+    authMiddleware,
+    validateBody(trainingProgressSchema),
+    async (req, res) => {
     const progress = await storage.upsertTrainingProgress({
       userId: req.user!.id,
       courseId: req.body.courseId,
@@ -746,7 +908,8 @@ export async function registerRoutes(
     }
 
     return res.json(progress);
-  });
+    },
+  );
 
   // ─── News ──────────────────────────────────────────
   app.get("/api/news", authMiddleware, async (_req, res) => {
@@ -788,21 +951,27 @@ export async function registerRoutes(
     return res.json(school);
   });
 
-  app.put("/api/settings", authMiddleware, async (req, res) => {
-    const updated = await storage.updateSchool(req.user!.schoolId, req.body);
-    if (!updated) return res.status(404).json({ message: "School not found" });
+  app.put(
+    "/api/settings",
+    authMiddleware,
+    requireRole("admin", "dpo"),
+    validateBody(updateSettingsSchema),
+    async (req, res) => {
+      const updated = await storage.updateSchool(req.user!.schoolId, req.body);
+      if (!updated) return res.status(404).json({ message: "School not found" });
 
-    await storage.createAuditEntry({
-      schoolId: req.user!.schoolId,
-      userId: req.user!.id,
-      action: "settings_update",
-      entityType: "school",
-      entityId: req.user!.schoolId,
-      details: "Updated school settings",
-    });
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "settings_update",
+        entityType: "school",
+        entityId: req.user!.schoolId,
+        details: "Updated school settings",
+      });
 
-    return res.json(updated);
-  });
+      return res.json(updated);
+    },
+  );
 
   return httpServer;
 }

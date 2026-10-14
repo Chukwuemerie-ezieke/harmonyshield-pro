@@ -239,6 +239,7 @@ export interface IStorage {
 
   // Compliance
   getComplianceItems(schoolId: number): Promise<any[]>;
+  getComplianceItem(id: number): Promise<any | undefined>;
   getComplianceScore(schoolId: number): Promise<number>;
   createComplianceItem(data: any): Promise<any>;
   updateComplianceItem(id: number, data: Partial<any>): Promise<any | undefined>;
@@ -256,6 +257,7 @@ export interface IStorage {
 
   // Incident Actions
   getIncidentActions(incidentId: number): Promise<any[]>;
+  getIncidentAction(id: number): Promise<any | undefined>;
   createIncidentAction(data: any): Promise<any>;
   updateIncidentAction(id: number, data: Partial<any>): Promise<any | undefined>;
 
@@ -337,6 +339,10 @@ export class DatabaseStorage implements IStorage {
     return many(db.select().from(complianceItems).where(eq(complianceItems.schoolId, schoolId)));
   }
 
+  async getComplianceItem(id: number) {
+    return first(db.select().from(complianceItems).where(eq(complianceItems.id, id)));
+  }
+
   async getComplianceScore(schoolId: number) {
     const items = await this.getComplianceItems(schoolId);
     if (items.length === 0) return 0;
@@ -407,6 +413,10 @@ export class DatabaseStorage implements IStorage {
   // ─── Incident Actions ──────────────────────────────
   async getIncidentActions(incidentId: number) {
     return many(db.select().from(incidentActions).where(eq(incidentActions.incidentId, incidentId)).orderBy(desc(incidentActions.createdAt)));
+  }
+
+  async getIncidentAction(id: number) {
+    return first(db.select().from(incidentActions).where(eq(incidentActions.id, id)));
   }
 
   async createIncidentAction(data: any) {
