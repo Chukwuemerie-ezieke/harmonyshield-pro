@@ -1,16 +1,56 @@
 import express, { type Request, Response, NextFunction } from "express";
+import helmet from "helmet";
+import cors from "cors";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
+import { apiLimiter } from "./rate-limit";
 import { createServer } from "http";
 
 const app = express();
 const httpServer = createServer(app);
+
+const isProduction = process.env.NODE_ENV === "production";
+
+// Trust the first proxy hop so req.ip and rate limiting work correctly when
+// running behind a load balancer / reverse proxy (common on hosting platforms).
+app.set("trust proxy", 1);
+
+// Security headers. Disable the default CSP outside production because it
+// blocks the Vite dev client (inline scripts, HMR websocket, eval). In
+// production the SPA is served from the same origin, so helmet's defaults are
+// safe; we keep crossOriginEmbedderPolicy off to avoid breaking asset loading.
+app.use(
+  helmet({
+    contentSecurityPolicy: isProduction ? undefined : false,
+    crossOriginEmbedderPolicy: false,
+  }),
+);
+
+// CORS. By default the API is same-origin only (no cross-origin headers). Set
+// ALLOWED_ORIGINS to a comma-separated list of origins to opt into CORS.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+if (allowedOrigins.length > 0) {
+  app.use(
+    cors({
+      origin: allowedOrigins,
+      credentials: true,
+    }),
+  );
+}
 
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;
   }
 }
+
+// Global, loose rate limiter for the whole API surface. Stricter per-route
+// limits (auth) are applied in routes.ts.
+app.use("/api", apiLimiter);
 
 app.use(
   express.json({

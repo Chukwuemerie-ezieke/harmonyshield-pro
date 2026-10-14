@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { hashPassword, verifyPassword, generateToken, verifyToken, authMiddleware } from "./auth";
 import { fetchLiveNews, fetchOTXThreats, checkIPReputation, getFeedStatus } from "./live-feeds";
+import { authLimiter } from "./rate-limit";
 
 async function seedDatabase() {
   // Check if already seeded
@@ -492,7 +493,7 @@ export async function registerRoutes(
   // ═══════════════════════════════════════════════════
 
   // ─── Auth: Login ───────────────────────────────────
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", authLimiter, async (req, res) => {
     try {
       const { email, password } = req.body;
       if (!email || !password) {
@@ -530,7 +531,7 @@ export async function registerRoutes(
   });
 
   // ─── Auth: Register ────────────────────────────────
-  app.post("/api/auth/register", async (req, res) => {
+  app.post("/api/auth/register", authLimiter, async (req, res) => {
     try {
       const { name, email, password, schoolId, role } = req.body;
       if (!name || !email || !password) {
@@ -650,7 +651,11 @@ export async function registerRoutes(
 
   app.get("/api/ip-check/:ip", authMiddleware, async (req, res) => {
     const result = await checkIPReputation(String(req.params.ip));
-    if (!result) return res.status(500).json({ message: "IP check failed" });
+    if (!result.available) {
+      // 503: the live reputation source is not configured/available. Never
+      // return fabricated numbers.
+      return res.status(503).json(result);
+    }
     return res.json(result);
   });
 

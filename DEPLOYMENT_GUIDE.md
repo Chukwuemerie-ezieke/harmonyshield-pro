@@ -47,11 +47,20 @@ cp .env.example .env
 Edit `.env` with your values:
 
 ```env
-# REQUIRED for production — use a long random string (32+ characters)
+# REQUIRED for production — use a long random string (32+ characters).
+# The server will REFUSE TO START in production if this is missing or shorter
+# than 32 characters. It never falls back to a default secret in production.
 JWT_SECRET=your-very-long-random-secret-string-here
+
+# OPTIONAL — comma-separated list of allowed CORS origins (empty = same-origin only)
+ALLOWED_ORIGINS=
 
 # OPTIONAL — enhances threat intelligence feeds
 OTX_API_KEY=your-otx-api-key
+
+# OPTIONAL — required for live IP reputation checks. Without it, the
+# /api/ip-check endpoint reports reputation as unavailable (503) and returns
+# no simulated data.
 ABUSEIPDB_API_KEY=your-abuseipdb-api-key
 
 # Server port (most platforms set this automatically)
@@ -371,11 +380,12 @@ npm start
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `JWT_SECRET` | **Yes** (production) | `harmonyshield-dev-secret` | JWT signing key. Must be unique and secret in production |
+| `JWT_SECRET` | **Yes** (production) | insecure dev fallback (dev only) | JWT signing key (min 32 chars). In production the server refuses to start if it is missing or weak; in development an insecure fallback is used with a warning |
+| `ALLOWED_ORIGINS` | No | — (same-origin only) | Comma-separated list of origins allowed via CORS |
 | `PORT` | No | `5000` | HTTP port. Most platforms set this automatically |
 | `NODE_ENV` | No | `development` | Set to `production` for production builds |
 | `OTX_API_KEY` | No | — | AlienVault OTX API key for enhanced threat feeds |
-| `ABUSEIPDB_API_KEY` | No | — | AbuseIPDB key for live IP reputation checks |
+| `ABUSEIPDB_API_KEY` | No | — | AbuseIPDB key for live IP reputation checks. Without it, `/api/ip-check` reports reputation as unavailable (503) with no simulated data |
 | `DATABASE_URL` | No | — | PostgreSQL connection string (only if migrating from SQLite) |
 
 ### Getting Free API Keys

@@ -2,8 +2,46 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
 
-const JWT_SECRET = process.env.JWT_SECRET || "harmonyshield-dev-secret";
 const JWT_EXPIRY = "7d";
+const MIN_JWT_SECRET_LENGTH = 32;
+const DEV_JWT_SECRET = "harmonyshield-dev-secret";
+
+/**
+ * Resolve the JWT secret with a fail-fast policy:
+ * - In production, the server REFUSES to boot unless JWT_SECRET is set and
+ *   is at least MIN_JWT_SECRET_LENGTH characters long. It never falls back to
+ *   the hardcoded dev secret in production.
+ * - Outside production, an unset or weak secret is allowed (so the demo keeps
+ *   working) but a loud warning is logged whenever the dev fallback is used.
+ */
+function resolveJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  const isProduction = process.env.NODE_ENV === "production";
+
+  if (isProduction) {
+    if (!secret || secret.length < MIN_JWT_SECRET_LENGTH) {
+      throw new Error(
+        `JWT_SECRET must be set to a strong value (at least ${MIN_JWT_SECRET_LENGTH} characters) in production. ` +
+          "The server will not start with a missing, weak, or default secret. " +
+          'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(64).toString(\'hex\'))"',
+      );
+    }
+    return secret;
+  }
+
+  if (!secret || secret.length < MIN_JWT_SECRET_LENGTH) {
+    console.warn(
+      "\u26A0\uFE0F  [auth] JWT_SECRET is unset or weak - using an INSECURE development fallback. " +
+        "Set a strong JWT_SECRET (>= 32 chars) before deploying to production.",
+    );
+    return secret || DEV_JWT_SECRET;
+  }
+
+  return secret;
+}
+
+// Resolve once at module load so production fails fast at startup.
+const JWT_SECRET = resolveJwtSecret();
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 10);

@@ -13,6 +13,7 @@ const allowlist = [
   "drizzle-zod",
   "express",
   "express-rate-limit",
+  "helmet",
   "express-session",
   "jsonwebtoken",
   "memorystore",

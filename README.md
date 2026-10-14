@@ -135,9 +135,10 @@ The app will be running at `http://localhost:5000`.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `JWT_SECRET` | Yes (for production) | Secret key for signing JWT tokens. Use a long random string |
+| `JWT_SECRET` | Yes (for production) | Secret key for signing JWT tokens. Must be at least 32 characters. In production the server refuses to start if it is missing or weak; in development an insecure fallback is used with a warning |
+| `ALLOWED_ORIGINS` | No | Comma-separated list of origins allowed via CORS. Empty = same-origin only (default) |
 | `OTX_API_KEY` | No | AlienVault OTX API key — enhances threat feeds. Get one free at [otx.alienvault.com](https://otx.alienvault.com) |
-| `ABUSEIPDB_API_KEY` | No | AbuseIPDB API key — enables live IP reputation checks. Get one free at [abuseipdb.com](https://www.abuseipdb.com) |
+| `ABUSEIPDB_API_KEY` | No | AbuseIPDB API key — enables live IP reputation checks. Without it, `/api/ip-check` reports reputation as unavailable (no simulated data). Get one free at [abuseipdb.com](https://www.abuseipdb.com) |
 | `PORT` | No | Server port (defaults to 5000) |
 | `NODE_ENV` | No | `development` or `production` |
 
