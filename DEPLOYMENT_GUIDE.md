@@ -297,7 +297,18 @@ For a split deployment (free frontend hosting + separate backend):
 
 ## 7. PostgreSQL Migration
 
-The app ships with SQLite for zero-config setup. Here's how to migrate to PostgreSQL for production scale.
+The app has a **dual-driver storage layer** (`server/storage.ts`). It selects
+its database driver automatically from the `DATABASE_URL` environment variable
+at startup — no code changes are required to switch:
+
+| `DATABASE_URL` | Driver | Schema source | Use case |
+|----------------|--------|---------------|----------|
+| **unset** | `drizzle-orm/better-sqlite3` | `server/db-schema.ts` (`sqliteTable`) | Zero-config dev/test. A local `data.db` is created and seeded automatically. |
+| **set** | `drizzle-orm/node-postgres` (`pg` Pool) | `shared/schema.ts` (`pgTable`) | Production. |
+
+Every storage method is `async`, so the same API serves both the synchronous
+SQLite driver and the asynchronous PostgreSQL driver. On startup the server logs
+which driver it chose (`[Storage] Using PostgreSQL driver` / `... SQLite driver`).
 
 ### Step 1: Set Up PostgreSQL
 
@@ -312,67 +323,58 @@ You'll get a connection string like:
 postgresql://user:password@host:5432/database
 ```
 
-### Step 2: Update Environment
+### Step 2: Set the Connection String
 
-Add to your `.env`:
+Add to your production environment (`.env` or your platform's variables):
 ```env
 DATABASE_URL=postgresql://user:password@host:5432/harmonyshield
 ```
 
-### Step 3: Update Database Driver
+Setting this is **all that is needed** to switch the running app to PostgreSQL.
+There are no source edits — the driver branch is already implemented.
 
-In `server/storage.ts`, replace the SQLite setup:
+### Step 3: Apply the Committed Migrations
 
-```typescript
-// BEFORE (SQLite)
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import * as schema from "./db-schema";
-const sqlite = new Database("data.db");
-const db = drizzle(sqlite, { schema });
-
-// AFTER (PostgreSQL)
-import { Pool } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-import * as schema from "../shared/schema";  // Use the pgTable schema
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const db = drizzle(pool, { schema });
-```
-
-### Step 4: Update Drizzle Config
-
-In `drizzle.config.ts`:
-
-```typescript
-import { defineConfig } from "drizzle-kit";
-
-export default defineConfig({
-  schema: "./shared/schema.ts",
-  out: "./drizzle",
-  dialect: "postgresql",
-  dbCredentials: {
-    url: process.env.DATABASE_URL!,
-  },
-});
-```
-
-### Step 5: Push Schema & Seed
+Drizzle migrations for the PostgreSQL schema are generated from
+`shared/schema.ts` and **committed** to the `./migrations` directory. Apply them
+to your database before the first start:
 
 ```bash
-# Push the schema to PostgreSQL
-npx drizzle-kit push
+# Apply the committed SQL migrations in ./migrations
+DATABASE_URL=postgresql://... npm run db:migrate
 
-# The app auto-seeds on first startup
-npm run build
-npm start
+# Alternatively, for a quick first provision, push the schema directly:
+DATABASE_URL=postgresql://... npm run db:push
 ```
+
+If you later change `shared/schema.ts`, regenerate the migration files (this
+needs only the schema, not a live database) and commit the result:
+
+```bash
+npm run db:generate   # writes new SQL into ./migrations
+```
+
+### Step 4: Build, Start, and Seed
+
+```bash
+npm run build
+DATABASE_URL=postgresql://... npm start
+```
+
+The demo-data seed still runs automatically on first startup: when the `schools`
+table is empty the app seeds schools, users (including the demo admin
+`admin@fgcenugu.edu.ng` / `demo123`), compliance items, threats, incidents,
+training courses, news, and audit entries.
 
 ### Important Notes
 
-- The `shared/schema.ts` file already uses `pgTable` — it's production-ready
-- The `server/db-schema.ts` (SQLite version) can be deleted after migration
-- All Drizzle queries in `storage.ts` will need `.then()` or `await` since PostgreSQL is async (SQLite was sync)
-- Update `.get()` calls to use `await` and adjust for async behavior
+- `shared/schema.ts` (the `pgTable` definitions) is the source of truth for the
+  PostgreSQL migrations; `server/db-schema.ts` is the matching `sqliteTable`
+  mirror used only when `DATABASE_URL` is unset.
+- Timestamps are written explicitly as ISO strings in application code, so the
+  schema does not rely on a database-side `now()` default.
+- Keep both schema files in sync when you add or change columns, then run
+  `npm run db:generate` and commit the new migration.
 
 ---
 
@@ -386,7 +388,7 @@ npm start
 | `NODE_ENV` | No | `development` | Set to `production` for production builds |
 | `OTX_API_KEY` | No | — | AlienVault OTX API key for enhanced threat feeds |
 | `ABUSEIPDB_API_KEY` | No | — | AbuseIPDB key for live IP reputation checks. Without it, `/api/ip-check` reports reputation as unavailable (503) with no simulated data |
-| `DATABASE_URL` | No | — | PostgreSQL connection string (only if migrating from SQLite) |
+| `DATABASE_URL` | No | — (SQLite) | PostgreSQL connection string. When set, the app uses the PostgreSQL driver; when unset it uses the zero-config SQLite driver. See [PostgreSQL Migration](#7-postgresql-migration) |
 
 ### Getting Free API Keys
 

@@ -7,13 +7,13 @@ import { authLimiter } from "./rate-limit";
 
 async function seedDatabase() {
   // Check if already seeded
-  const existingSchools = storage.getSchools();
+  const existingSchools = await storage.getSchools();
   if (existingSchools.length > 0) return;
 
   console.log("[Seed] Seeding database...");
 
   // ─── Schools ───────────────────────────────────────
-  const school1 = storage.createSchool({
+  const school1 = await storage.createSchool({
     name: "Federal Government College Enugu",
     address: "Independence Layout, Enugu",
     state: "Enugu",
@@ -22,7 +22,7 @@ async function seedDatabase() {
     studentCount: 1200,
     ndpcRegNumber: "NDPC/SCH/2024/0042",
   });
-  const school2 = storage.createSchool({
+  const school2 = await storage.createSchool({
     name: "Queens College Lagos",
     address: "Yaba, Lagos",
     state: "Lagos",
@@ -31,7 +31,7 @@ async function seedDatabase() {
     studentCount: 2500,
     ndpcRegNumber: "NDPC/SCH/2024/0089",
   });
-  const school3 = storage.createSchool({
+  const school3 = await storage.createSchool({
     name: "Government Secondary School Kano",
     address: "Nassarawa GRA, Kano",
     state: "Kano",
@@ -44,7 +44,7 @@ async function seedDatabase() {
   // ─── Users (password: demo123) ─────────────────────
   const hashedPw = await hashPassword("demo123");
 
-  const user1 = storage.createUser({
+  const user1 = await storage.createUser({
     schoolId: school1.id,
     email: "admin@fgcenugu.edu.ng",
     name: "Chukwuemeka Okafor",
@@ -52,7 +52,7 @@ async function seedDatabase() {
     role: "admin",
     department: "ICT",
   });
-  storage.createUser({
+  await storage.createUser({
     schoolId: school1.id,
     email: "dpo@fgcenugu.edu.ng",
     name: "Adaeze Nnamdi",
@@ -60,7 +60,7 @@ async function seedDatabase() {
     role: "dpo",
     department: "Data Protection",
   });
-  storage.createUser({
+  await storage.createUser({
     schoolId: school1.id,
     email: "teacher@fgcenugu.edu.ng",
     name: "Ibrahim Musa",
@@ -68,7 +68,7 @@ async function seedDatabase() {
     role: "teacher",
     department: "Computer Science",
   });
-  storage.createUser({
+  await storage.createUser({
     schoolId: school2.id,
     email: "admin@queenscollege.edu.ng",
     name: "Folake Adeyemi",
@@ -76,7 +76,7 @@ async function seedDatabase() {
     role: "admin",
     department: "Administration",
   });
-  storage.createUser({
+  await storage.createUser({
     schoolId: school3.id,
     email: "admin@gsskano.edu.ng",
     name: "Abubakar Yusuf",
@@ -105,11 +105,8 @@ async function seedDatabase() {
   ];
 
   for (const item of complianceData) {
-    storage.updateComplianceItem(0, {}); // noop, just to avoid lint
-    // Use direct insert through createAuditEntry pattern
     const { category, ...rest } = item;
-    // We need to insert compliance items directly
-    const insertData = {
+    await storage.createComplianceItem({
       schoolId: school1.id,
       itemKey: rest.itemKey,
       title: rest.title,
@@ -118,11 +115,7 @@ async function seedDatabase() {
       weight: rest.weight,
       dueDate: "2025-06-30",
       updatedAt: new Date().toISOString(),
-    };
-    // Import db directly for seed
-    const { db } = await import("./storage");
-    const { complianceItems } = await import("./db-schema");
-    db.insert(complianceItems).values(insertData).run();
+    });
   }
 
   // ─── Threats (12) ──────────────────────────────────
@@ -142,11 +135,11 @@ async function seedDatabase() {
   ];
 
   for (const threat of threatData) {
-    storage.createThreat(threat);
+    await storage.createThreat(threat);
   }
 
   // ─── Incidents (3 for school1) ─────────────────────
-  const inc1 = storage.createIncident({
+  const inc1 = await storage.createIncident({
     schoolId: school1.id,
     reportedBy: "Chukwuemeka Okafor",
     type: "phishing",
@@ -157,14 +150,14 @@ async function seedDatabase() {
     affectedSystems: "Email System, Staff Accounts",
     affectedCount: 12,
   });
-  storage.createIncidentAction({
+  await storage.createIncidentAction({
     incidentId: inc1.id,
     action: "Identified and quarantined phishing emails",
     performedBy: "Chukwuemeka Okafor",
     status: "completed",
     notes: "Used email filters to identify 47 similar emails across the organization",
   });
-  storage.createIncidentAction({
+  await storage.createIncidentAction({
     incidentId: inc1.id,
     action: "Reset passwords for affected accounts",
     performedBy: "Adaeze Nnamdi",
@@ -172,7 +165,7 @@ async function seedDatabase() {
     notes: "2 of 12 affected accounts have been reset so far",
   });
 
-  const inc2 = storage.createIncident({
+  const inc2 = await storage.createIncident({
     schoolId: school1.id,
     reportedBy: "Ibrahim Musa",
     type: "malware",
@@ -183,7 +176,7 @@ async function seedDatabase() {
     affectedSystems: "Computer Lab Workstations",
     affectedCount: 3,
   });
-  storage.createIncidentAction({
+  await storage.createIncidentAction({
     incidentId: inc2.id,
     action: "Isolated affected workstations from network",
     performedBy: "Ibrahim Musa",
@@ -191,7 +184,7 @@ async function seedDatabase() {
     notes: "All 3 machines disconnected and quarantined",
   });
 
-  const inc3 = storage.createIncident({
+  const inc3 = await storage.createIncident({
     schoolId: school1.id,
     reportedBy: "Adaeze Nnamdi",
     type: "unauthorized_access",
@@ -444,11 +437,8 @@ Under the NDPR/NDPA, data breaches must be reported to:
     },
   ];
 
-  const { db: dbRef } = await import("./storage");
-  const { trainingCourses: tcTable } = await import("./db-schema");
-
   for (const course of courses) {
-    dbRef.insert(tcTable).values(course).run();
+    await storage.createCourse(course);
   }
 
   // ─── News Articles (5) ─────────────────────────────
@@ -461,7 +451,7 @@ Under the NDPR/NDPA, data breaches must be reported to:
   ];
 
   for (const article of newsData) {
-    storage.createNewsArticle(article);
+    await storage.createNewsArticle(article);
   }
 
   // ─── Audit Log Entries ─────────────────────────────
@@ -474,7 +464,7 @@ Under the NDPR/NDPA, data breaches must be reported to:
   ];
 
   for (const entry of auditEntries) {
-    storage.createAuditEntry(entry);
+    await storage.createAuditEntry(entry);
   }
 
   console.log("[Seed] Database seeded successfully");
@@ -500,7 +490,7 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Email and password are required" });
       }
 
-      const user = storage.getUserByEmail(email);
+      const user = await storage.getUserByEmail(email);
       if (!user) {
         return res.status(401).json({ message: "Invalid email or password" });
       }
@@ -513,7 +503,7 @@ export async function registerRoutes(
       const token = generateToken(user.id, user.email, user.schoolId, user.role);
 
       // Log the login
-      storage.createAuditEntry({
+      await storage.createAuditEntry({
         schoolId: user.schoolId,
         userId: user.id,
         action: "user_login",
@@ -538,13 +528,13 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Name, email, and password are required" });
       }
 
-      const existing = storage.getUserByEmail(email);
+      const existing = await storage.getUserByEmail(email);
       if (existing) {
         return res.status(409).json({ message: "Email already registered" });
       }
 
       const hashedPw = await hashPassword(password);
-      const user = storage.createUser({
+      const user = await storage.createUser({
         name,
         email,
         password: hashedPw,
@@ -562,7 +552,7 @@ export async function registerRoutes(
   });
 
   // ─── Auth: Get Current User ────────────────────────
-  app.get("/api/auth/me", (req, res) => {
+  app.get("/api/auth/me", async (req, res) => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return res.status(401).json({ message: "Not authenticated" });
@@ -574,7 +564,7 @@ export async function registerRoutes(
       return res.status(401).json({ message: "Invalid token" });
     }
 
-    const user = storage.getUser(decoded.id);
+    const user = await storage.getUser(decoded.id);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -588,34 +578,34 @@ export async function registerRoutes(
   // ═══════════════════════════════════════════════════
 
   // ─── Dashboard ─────────────────────────────────────
-  app.get("/api/dashboard", authMiddleware, (req, res) => {
-    const stats = storage.getDashboardStats(req.user!.schoolId, req.user!.id);
+  app.get("/api/dashboard", authMiddleware, async (req, res) => {
+    const stats = await storage.getDashboardStats(req.user!.schoolId, req.user!.id);
     return res.json(stats);
   });
 
   // ─── Schools ───────────────────────────────────────
-  app.get("/api/schools", authMiddleware, (_req, res) => {
-    return res.json(storage.getSchools());
+  app.get("/api/schools", authMiddleware, async (_req, res) => {
+    return res.json(await storage.getSchools());
   });
 
-  app.get("/api/schools/:id", authMiddleware, (req, res) => {
-    const school = storage.getSchool(Number(req.params.id));
+  app.get("/api/schools/:id", authMiddleware, async (req, res) => {
+    const school = await storage.getSchool(Number(req.params.id));
     if (!school) return res.status(404).json({ message: "School not found" });
     return res.json(school);
   });
 
   // ─── Compliance ────────────────────────────────────
-  app.get("/api/compliance", authMiddleware, (req, res) => {
-    const items = storage.getComplianceItems(req.user!.schoolId);
-    const score = storage.getComplianceScore(req.user!.schoolId);
+  app.get("/api/compliance", authMiddleware, async (req, res) => {
+    const items = await storage.getComplianceItems(req.user!.schoolId);
+    const score = await storage.getComplianceScore(req.user!.schoolId);
     return res.json({ items, score });
   });
 
-  app.put("/api/compliance/:id", authMiddleware, (req, res) => {
-    const updated = storage.updateComplianceItem(Number(req.params.id), req.body);
+  app.put("/api/compliance/:id", authMiddleware, async (req, res) => {
+    const updated = await storage.updateComplianceItem(Number(req.params.id), req.body);
     if (!updated) return res.status(404).json({ message: "Item not found" });
 
-    storage.createAuditEntry({
+    await storage.createAuditEntry({
       schoolId: req.user!.schoolId,
       userId: req.user!.id,
       action: "compliance_update",
@@ -630,7 +620,7 @@ export async function registerRoutes(
   // ─── Threats ───────────────────────────────────────
   app.get("/api/threats", authMiddleware, async (_req, res) => {
     try {
-      const seedThreats = storage.getThreats();
+      const seedThreats = await storage.getThreats();
       let liveThreats: any[] = [];
       try {
         const otx = await fetchOTXThreats();
@@ -641,12 +631,13 @@ export async function registerRoutes(
       const seedWithFlag = seedThreats.map(t => ({ ...t, isLive: false }));
       return res.json([...liveThreats, ...seedWithFlag]);
     } catch (err) {
-      return res.json(storage.getThreats().map(t => ({ ...t, isLive: false })));
+      const fallback = await storage.getThreats();
+      return res.json(fallback.map(t => ({ ...t, isLive: false })));
     }
   });
 
-  app.get("/api/threats/stats", authMiddleware, (_req, res) => {
-    return res.json(storage.getThreatStats());
+  app.get("/api/threats/stats", authMiddleware, async (_req, res) => {
+    return res.json(await storage.getThreatStats());
   });
 
   app.get("/api/ip-check/:ip", authMiddleware, async (req, res) => {
@@ -660,24 +651,24 @@ export async function registerRoutes(
   });
 
   // ─── Incidents ─────────────────────────────────────
-  app.get("/api/incidents", authMiddleware, (req, res) => {
-    return res.json(storage.getIncidents(req.user!.schoolId));
+  app.get("/api/incidents", authMiddleware, async (req, res) => {
+    return res.json(await storage.getIncidents(req.user!.schoolId));
   });
 
-  app.get("/api/incidents/:id", authMiddleware, (req, res) => {
-    const incident = storage.getIncident(Number(req.params.id));
+  app.get("/api/incidents/:id", authMiddleware, async (req, res) => {
+    const incident = await storage.getIncident(Number(req.params.id));
     if (!incident) return res.status(404).json({ message: "Incident not found" });
-    const actions = storage.getIncidentActions(incident.id);
+    const actions = await storage.getIncidentActions(incident.id);
     return res.json({ ...incident, actions });
   });
 
-  app.post("/api/incidents", authMiddleware, (req, res) => {
-    const incident = storage.createIncident({
+  app.post("/api/incidents", authMiddleware, async (req, res) => {
+    const incident = await storage.createIncident({
       ...req.body,
       schoolId: req.user!.schoolId,
     });
 
-    storage.createAuditEntry({
+    await storage.createAuditEntry({
       schoolId: req.user!.schoolId,
       userId: req.user!.id,
       action: "incident_created",
@@ -689,11 +680,11 @@ export async function registerRoutes(
     return res.json(incident);
   });
 
-  app.put("/api/incidents/:id", authMiddleware, (req, res) => {
-    const updated = storage.updateIncident(Number(req.params.id), req.body);
+  app.put("/api/incidents/:id", authMiddleware, async (req, res) => {
+    const updated = await storage.updateIncident(Number(req.params.id), req.body);
     if (!updated) return res.status(404).json({ message: "Incident not found" });
 
-    storage.createAuditEntry({
+    await storage.createAuditEntry({
       schoolId: req.user!.schoolId,
       userId: req.user!.id,
       action: "incident_updated",
@@ -706,37 +697,37 @@ export async function registerRoutes(
   });
 
   // ─── Incident Actions ──────────────────────────────
-  app.post("/api/incidents/:id/actions", authMiddleware, (req, res) => {
-    const action = storage.createIncidentAction({
+  app.post("/api/incidents/:id/actions", authMiddleware, async (req, res) => {
+    const action = await storage.createIncidentAction({
       ...req.body,
       incidentId: Number(req.params.id),
     });
     return res.json(action);
   });
 
-  app.put("/api/incident-actions/:id", authMiddleware, (req, res) => {
-    const updated = storage.updateIncidentAction(Number(req.params.id), req.body);
+  app.put("/api/incident-actions/:id", authMiddleware, async (req, res) => {
+    const updated = await storage.updateIncidentAction(Number(req.params.id), req.body);
     if (!updated) return res.status(404).json({ message: "Action not found" });
     return res.json(updated);
   });
 
   // ─── Training ──────────────────────────────────────
-  app.get("/api/training/courses", authMiddleware, (_req, res) => {
-    return res.json(storage.getCourses());
+  app.get("/api/training/courses", authMiddleware, async (_req, res) => {
+    return res.json(await storage.getCourses());
   });
 
-  app.get("/api/training/courses/:id", authMiddleware, (req, res) => {
-    const course = storage.getCourse(Number(req.params.id));
+  app.get("/api/training/courses/:id", authMiddleware, async (req, res) => {
+    const course = await storage.getCourse(Number(req.params.id));
     if (!course) return res.status(404).json({ message: "Course not found" });
     return res.json(course);
   });
 
-  app.get("/api/training/progress", authMiddleware, (req, res) => {
-    return res.json(storage.getTrainingProgress(req.user!.id));
+  app.get("/api/training/progress", authMiddleware, async (req, res) => {
+    return res.json(await storage.getTrainingProgress(req.user!.id));
   });
 
-  app.post("/api/training/progress", authMiddleware, (req, res) => {
-    const progress = storage.upsertTrainingProgress({
+  app.post("/api/training/progress", authMiddleware, async (req, res) => {
+    const progress = await storage.upsertTrainingProgress({
       userId: req.user!.id,
       courseId: req.body.courseId,
       status: req.body.status,
@@ -744,7 +735,7 @@ export async function registerRoutes(
     });
 
     if (req.body.status === "completed") {
-      storage.createAuditEntry({
+      await storage.createAuditEntry({
         schoolId: req.user!.schoolId,
         userId: req.user!.id,
         action: "training_completed",
@@ -760,7 +751,7 @@ export async function registerRoutes(
   // ─── News ──────────────────────────────────────────
   app.get("/api/news", authMiddleware, async (_req, res) => {
     try {
-      const seedNews = storage.getNewsArticles();
+      const seedNews = await storage.getNewsArticles();
       let liveNews: any[] = [];
       try {
         liveNews = await fetchLiveNews();
@@ -770,18 +761,19 @@ export async function registerRoutes(
       const seedWithFlag = seedNews.map(n => ({ ...n, isLive: false }));
       return res.json([...liveNews.slice(0, 10), ...seedWithFlag]);
     } catch {
-      return res.json(storage.getNewsArticles().map(n => ({ ...n, isLive: false })));
+      const fallback = await storage.getNewsArticles();
+      return res.json(fallback.map(n => ({ ...n, isLive: false })));
     }
   });
 
   // ─── Users ─────────────────────────────────────────
-  app.get("/api/users", authMiddleware, (req, res) => {
-    return res.json(storage.getUsers(req.user!.schoolId));
+  app.get("/api/users", authMiddleware, async (req, res) => {
+    return res.json(await storage.getUsers(req.user!.schoolId));
   });
 
   // ─── Audit ─────────────────────────────────────────
-  app.get("/api/audit", authMiddleware, (req, res) => {
-    return res.json(storage.getAuditLog(req.user!.schoolId));
+  app.get("/api/audit", authMiddleware, async (req, res) => {
+    return res.json(await storage.getAuditLog(req.user!.schoolId));
   });
 
   // ─── Feed Status ───────────────────────────────────
@@ -790,17 +782,17 @@ export async function registerRoutes(
   });
 
   // ─── Settings ──────────────────────────────────────
-  app.get("/api/settings", authMiddleware, (req, res) => {
-    const school = storage.getSchool(req.user!.schoolId);
+  app.get("/api/settings", authMiddleware, async (req, res) => {
+    const school = await storage.getSchool(req.user!.schoolId);
     if (!school) return res.status(404).json({ message: "School not found" });
     return res.json(school);
   });
 
-  app.put("/api/settings", authMiddleware, (req, res) => {
-    const updated = storage.updateSchool(req.user!.schoolId, req.body);
+  app.put("/api/settings", authMiddleware, async (req, res) => {
+    const updated = await storage.updateSchool(req.user!.schoolId, req.body);
     if (!updated) return res.status(404).json({ message: "School not found" });
 
-    storage.createAuditEntry({
+    await storage.createAuditEntry({
       schoolId: req.user!.schoolId,
       userId: req.user!.id,
       action: "settings_update",
