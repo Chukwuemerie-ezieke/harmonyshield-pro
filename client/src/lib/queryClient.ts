@@ -1,7 +1,11 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 import { getAuthToken } from "./auth";
 
-const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
+// The API is served same-origin on a single port, so the default base is an
+// empty string (requests go to the current origin). An explicit base can be
+// provided at build time via VITE_API_BASE for deployments that split the API
+// and the SPA across origins.
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 function getAuthHeaders(): Record<string, string> {
   const token = getAuthToken();

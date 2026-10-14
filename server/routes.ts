@@ -1,18 +1,92 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import { z } from "zod";
 import { storage } from "./storage";
 import { hashPassword, verifyPassword, generateToken, verifyToken, authMiddleware } from "./auth";
+import { requireRole, verifyOwnership } from "./authz";
+import { validateBody } from "./validate";
 import { fetchLiveNews, fetchOTXThreats, checkIPReputation, getFeedStatus } from "./live-feeds";
+import { authLimiter } from "./rate-limit";
+import { evidenceUpload, ALLOWED_MIME_TYPES, UPLOAD_MAX_BYTES } from "./uploads";
+import { buildComplianceCsv, buildCompliancePdf } from "./reports";
+import fs from "fs";
+import {
+  insertIncidentSchema,
+  insertIncidentActionSchema,
+  insertComplianceItemSchema,
+  insertSchoolSchema,
+} from "@shared/schema";
+
+// ─── Request body schemas ────────────────────────────
+// These derive from the drizzle-zod insert schemas in shared/schema.ts but
+// drop server-controlled fields so clients can never set id, schoolId,
+// ownership, or audit timestamps. The server injects those from the
+// authenticated session.
+
+const allowedUserRoles = ["admin", "dpo", "staff", "teacher"] as const;
+
+// POST /api/incidents - client supplies incident details; server injects
+// schoolId and createdAt. reportedBy stays client-supplied (display name).
+const createIncidentSchema = insertIncidentSchema.omit({
+  schoolId: true,
+  createdAt: true,
+});
+
+// PUT /api/incidents/:id - partial update of the client-editable subset.
+const updateIncidentSchema = createIncidentSchema.partial();
+
+// PUT /api/compliance/:id - partial update; schoolId/itemKey are not client
+// editable through this route.
+const updateComplianceSchema = insertComplianceItemSchema
+  .omit({ schoolId: true, itemKey: true, updatedAt: true })
+  .partial();
+
+// POST /api/incidents/:id/actions - server injects incidentId and createdAt.
+const createIncidentActionSchema = insertIncidentActionSchema.omit({
+  incidentId: true,
+  createdAt: true,
+});
+
+// PUT /api/incident-actions/:id - partial update of an action.
+const updateIncidentActionSchema = createIncidentActionSchema.partial();
+
+// POST /api/training/progress - progress is always scoped to the current user.
+const trainingProgressSchema = z.object({
+  courseId: z.number().int().positive(),
+  status: z.string().min(1),
+  score: z.number().int().min(0).max(100).optional(),
+});
+
+// PUT /api/settings - a school admin may edit their own school's details.
+// createdAt is server-owned, so drop it here to prevent an admin/dpo from
+// rewriting their own school's creation timestamp. (id is already omitted by
+// insertSchoolSchema.)
+const updateSettingsSchema = insertSchoolSchema.omit({ createdAt: true }).partial();
+
+// Session lifetime. Must match the JWT expiry in server/auth.ts (7 days) so a
+// session row never outlives the signature it guards.
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// POST /api/auth/register - admin-only. The creating admin's schoolId is
+// forced server-side; role is constrained to a safe allowlist and defaults to
+// "staff". Clients can never choose id/schoolId.
+const registerSchema = z.object({
+  name: z.string().min(1),
+  email: z.string().email(),
+  password: z.string().min(6),
+  role: z.enum(allowedUserRoles).optional(),
+  department: z.string().optional(),
+});
 
 async function seedDatabase() {
   // Check if already seeded
-  const existingSchools = storage.getSchools();
+  const existingSchools = await storage.getSchools();
   if (existingSchools.length > 0) return;
 
   console.log("[Seed] Seeding database...");
 
   // ─── Schools ───────────────────────────────────────
-  const school1 = storage.createSchool({
+  const school1 = await storage.createSchool({
     name: "Federal Government College Enugu",
     address: "Independence Layout, Enugu",
     state: "Enugu",
@@ -21,7 +95,7 @@ async function seedDatabase() {
     studentCount: 1200,
     ndpcRegNumber: "NDPC/SCH/2024/0042",
   });
-  const school2 = storage.createSchool({
+  const school2 = await storage.createSchool({
     name: "Queens College Lagos",
     address: "Yaba, Lagos",
     state: "Lagos",
@@ -30,7 +104,7 @@ async function seedDatabase() {
     studentCount: 2500,
     ndpcRegNumber: "NDPC/SCH/2024/0089",
   });
-  const school3 = storage.createSchool({
+  const school3 = await storage.createSchool({
     name: "Government Secondary School Kano",
     address: "Nassarawa GRA, Kano",
     state: "Kano",
@@ -43,7 +117,7 @@ async function seedDatabase() {
   // ─── Users (password: demo123) ─────────────────────
   const hashedPw = await hashPassword("demo123");
 
-  const user1 = storage.createUser({
+  const user1 = await storage.createUser({
     schoolId: school1.id,
     email: "admin@fgcenugu.edu.ng",
     name: "Chukwuemeka Okafor",
@@ -51,7 +125,7 @@ async function seedDatabase() {
     role: "admin",
     department: "ICT",
   });
-  storage.createUser({
+  await storage.createUser({
     schoolId: school1.id,
     email: "dpo@fgcenugu.edu.ng",
     name: "Adaeze Nnamdi",
@@ -59,7 +133,7 @@ async function seedDatabase() {
     role: "dpo",
     department: "Data Protection",
   });
-  storage.createUser({
+  await storage.createUser({
     schoolId: school1.id,
     email: "teacher@fgcenugu.edu.ng",
     name: "Ibrahim Musa",
@@ -67,7 +141,7 @@ async function seedDatabase() {
     role: "teacher",
     department: "Computer Science",
   });
-  storage.createUser({
+  await storage.createUser({
     schoolId: school2.id,
     email: "admin@queenscollege.edu.ng",
     name: "Folake Adeyemi",
@@ -75,7 +149,7 @@ async function seedDatabase() {
     role: "admin",
     department: "Administration",
   });
-  storage.createUser({
+  await storage.createUser({
     schoolId: school3.id,
     email: "admin@gsskano.edu.ng",
     name: "Abubakar Yusuf",
@@ -104,11 +178,8 @@ async function seedDatabase() {
   ];
 
   for (const item of complianceData) {
-    storage.updateComplianceItem(0, {}); // noop, just to avoid lint
-    // Use direct insert through createAuditEntry pattern
     const { category, ...rest } = item;
-    // We need to insert compliance items directly
-    const insertData = {
+    await storage.createComplianceItem({
       schoolId: school1.id,
       itemKey: rest.itemKey,
       title: rest.title,
@@ -117,11 +188,7 @@ async function seedDatabase() {
       weight: rest.weight,
       dueDate: "2025-06-30",
       updatedAt: new Date().toISOString(),
-    };
-    // Import db directly for seed
-    const { db } = await import("./storage");
-    const { complianceItems } = await import("./db-schema");
-    db.insert(complianceItems).values(insertData).run();
+    });
   }
 
   // ─── Threats (12) ──────────────────────────────────
@@ -141,11 +208,11 @@ async function seedDatabase() {
   ];
 
   for (const threat of threatData) {
-    storage.createThreat(threat);
+    await storage.createThreat(threat);
   }
 
   // ─── Incidents (3 for school1) ─────────────────────
-  const inc1 = storage.createIncident({
+  const inc1 = await storage.createIncident({
     schoolId: school1.id,
     reportedBy: "Chukwuemeka Okafor",
     type: "phishing",
@@ -156,14 +223,14 @@ async function seedDatabase() {
     affectedSystems: "Email System, Staff Accounts",
     affectedCount: 12,
   });
-  storage.createIncidentAction({
+  await storage.createIncidentAction({
     incidentId: inc1.id,
     action: "Identified and quarantined phishing emails",
     performedBy: "Chukwuemeka Okafor",
     status: "completed",
     notes: "Used email filters to identify 47 similar emails across the organization",
   });
-  storage.createIncidentAction({
+  await storage.createIncidentAction({
     incidentId: inc1.id,
     action: "Reset passwords for affected accounts",
     performedBy: "Adaeze Nnamdi",
@@ -171,7 +238,7 @@ async function seedDatabase() {
     notes: "2 of 12 affected accounts have been reset so far",
   });
 
-  const inc2 = storage.createIncident({
+  const inc2 = await storage.createIncident({
     schoolId: school1.id,
     reportedBy: "Ibrahim Musa",
     type: "malware",
@@ -182,7 +249,7 @@ async function seedDatabase() {
     affectedSystems: "Computer Lab Workstations",
     affectedCount: 3,
   });
-  storage.createIncidentAction({
+  await storage.createIncidentAction({
     incidentId: inc2.id,
     action: "Isolated affected workstations from network",
     performedBy: "Ibrahim Musa",
@@ -190,7 +257,7 @@ async function seedDatabase() {
     notes: "All 3 machines disconnected and quarantined",
   });
 
-  const inc3 = storage.createIncident({
+  const inc3 = await storage.createIncident({
     schoolId: school1.id,
     reportedBy: "Adaeze Nnamdi",
     type: "unauthorized_access",
@@ -443,11 +510,8 @@ Under the NDPR/NDPA, data breaches must be reported to:
     },
   ];
 
-  const { db: dbRef } = await import("./storage");
-  const { trainingCourses: tcTable } = await import("./db-schema");
-
   for (const course of courses) {
-    dbRef.insert(tcTable).values(course).run();
+    await storage.createCourse(course);
   }
 
   // ─── News Articles (5) ─────────────────────────────
@@ -460,7 +524,7 @@ Under the NDPR/NDPA, data breaches must be reported to:
   ];
 
   for (const article of newsData) {
-    storage.createNewsArticle(article);
+    await storage.createNewsArticle(article);
   }
 
   // ─── Audit Log Entries ─────────────────────────────
@@ -473,7 +537,7 @@ Under the NDPR/NDPA, data breaches must be reported to:
   ];
 
   for (const entry of auditEntries) {
-    storage.createAuditEntry(entry);
+    await storage.createAuditEntry(entry);
   }
 
   console.log("[Seed] Database seeded successfully");
@@ -492,14 +556,14 @@ export async function registerRoutes(
   // ═══════════════════════════════════════════════════
 
   // ─── Auth: Login ───────────────────────────────────
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", authLimiter, async (req, res) => {
     try {
       const { email, password } = req.body;
       if (!email || !password) {
         return res.status(400).json({ message: "Email and password are required" });
       }
 
-      const user = storage.getUserByEmail(email);
+      const user = await storage.getUserByEmail(email);
       if (!user) {
         return res.status(401).json({ message: "Invalid email or password" });
       }
@@ -510,9 +574,22 @@ export async function registerRoutes(
       }
 
       const token = generateToken(user.id, user.email, user.schoolId, user.role);
+      const decoded = verifyToken(token);
+
+      // Persist a server-side session keyed by the token's jti so the token
+      // can be revoked on logout. The sessions.token column stores the jti
+      // (an opaque identifier), never the raw JWT.
+      if (decoded) {
+        const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+        await storage.createSession({
+          userId: user.id,
+          token: decoded.jti,
+          expiresAt,
+        });
+      }
 
       // Log the login
-      storage.createAuditEntry({
+      await storage.createAuditEntry({
         schoolId: user.schoolId,
         userId: user.id,
         action: "user_login",
@@ -529,51 +606,53 @@ export async function registerRoutes(
     }
   });
 
-  // ─── Auth: Register ────────────────────────────────
-  app.post("/api/auth/register", async (req, res) => {
-    try {
-      const { name, email, password, schoolId, role } = req.body;
-      if (!name || !email || !password) {
-        return res.status(400).json({ message: "Name, email, and password are required" });
+  // ─── Auth: Register (admin-only) ───────────────────
+  // Locked down: only an authenticated admin may create users, and new users
+  // are always created WITHIN the admin's own school. The request body cannot
+  // choose schoolId at all, and role is constrained to a safe allowlist
+  // (defaulting to "staff"). This closes the previous hole where any
+  // unauthenticated caller could self-assign role="admin" and an arbitrary
+  // schoolId. Login and the seeded demo users are unaffected.
+  app.post(
+    "/api/auth/register",
+    authLimiter,
+    authMiddleware,
+    requireRole("admin"),
+    validateBody(registerSchema),
+    async (req, res) => {
+      try {
+        const { name, email, password, role, department } = req.body;
+
+        const existing = await storage.getUserByEmail(email);
+        if (existing) {
+          return res.status(409).json({ message: "Email already registered" });
+        }
+
+        const hashedPw = await hashPassword(password);
+        const user = await storage.createUser({
+          name,
+          email,
+          password: hashedPw,
+          department,
+          schoolId: req.user!.schoolId, // forced to the creating admin's school
+          role: role || "staff",
+        });
+
+        const { password: _, ...userData } = user;
+        return res.status(201).json({ user: userData });
+      } catch (err) {
+        console.error("Register error:", err);
+        return res.status(500).json({ message: "Internal server error" });
       }
-
-      const existing = storage.getUserByEmail(email);
-      if (existing) {
-        return res.status(409).json({ message: "Email already registered" });
-      }
-
-      const hashedPw = await hashPassword(password);
-      const user = storage.createUser({
-        name,
-        email,
-        password: hashedPw,
-        schoolId: schoolId || 1,
-        role: role || "staff",
-      });
-
-      const token = generateToken(user.id, user.email, user.schoolId, user.role);
-      const { password: _, ...userData } = user;
-      return res.json({ token, user: userData });
-    } catch (err) {
-      console.error("Register error:", err);
-      return res.status(500).json({ message: "Internal server error" });
-    }
-  });
+    },
+  );
 
   // ─── Auth: Get Current User ────────────────────────
-  app.get("/api/auth/me", (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ message: "Not authenticated" });
-    }
-
-    const token = authHeader.split(" ")[1];
-    const decoded = verifyToken(token);
-    if (!decoded) {
-      return res.status(401).json({ message: "Invalid token" });
-    }
-
-    const user = storage.getUser(decoded.id);
+  // Reuse authMiddleware for the shared JWT-signature + active-session
+  // (revocation) check so there is a single source of truth; this route only
+  // adds the user-still-exists lookup on top of req.user.
+  app.get("/api/auth/me", authMiddleware, async (req, res) => {
+    const user = await storage.getUser(req.user!.id);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -586,50 +665,260 @@ export async function registerRoutes(
   // PROTECTED ROUTES (require authMiddleware)
   // ═══════════════════════════════════════════════════
 
+  // ─── Auth: Logout ──────────────────────────────────
+  // Revoke the current token server-side by deleting its session row. After
+  // this call the same bearer token is rejected by authMiddleware (401).
+  app.post("/api/auth/logout", authMiddleware, async (req, res) => {
+    try {
+      const jti = req.user!.jti;
+      await storage.deleteSession(jti);
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "user_logout",
+        entityType: "user",
+        entityId: req.user!.id,
+        details: `Logout from ${req.ip}`,
+      });
+      return res.json({ message: "Logged out" });
+    } catch (err) {
+      console.error("Logout error:", err);
+      return res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  // ─── Auth: List current user's active sessions ─────
+  app.get("/api/auth/sessions", authMiddleware, async (req, res) => {
+    try {
+      const current = await storage.getSession(req.user!.jti);
+      // Only the current session is addressable by jti; expose a minimal,
+      // secret-free view (never the jti/token value itself).
+      const result = current
+        ? [{ userId: current.userId, createdAt: current.createdAt, expiresAt: current.expiresAt, current: true }]
+        : [];
+      return res.json({ sessions: result });
+    } catch (err) {
+      console.error("Sessions error:", err);
+      return res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
   // ─── Dashboard ─────────────────────────────────────
-  app.get("/api/dashboard", authMiddleware, (req, res) => {
-    const stats = storage.getDashboardStats(req.user!.schoolId, req.user!.id);
+  app.get("/api/dashboard", authMiddleware, async (req, res) => {
+    const stats = await storage.getDashboardStats(req.user!.schoolId, req.user!.id);
     return res.json(stats);
   });
 
   // ─── Schools ───────────────────────────────────────
-  app.get("/api/schools", authMiddleware, (_req, res) => {
-    return res.json(storage.getSchools());
+  app.get("/api/schools", authMiddleware, async (_req, res) => {
+    return res.json(await storage.getSchools());
   });
 
-  app.get("/api/schools/:id", authMiddleware, (req, res) => {
-    const school = storage.getSchool(Number(req.params.id));
+  app.get("/api/schools/:id", authMiddleware, async (req, res) => {
+    const id = Number(req.params.id);
+    // A user may only read the full details of their own school. Schools own
+    // record uses `id` as the ownership key (there is no `schoolId` column), so
+    // we check it directly rather than via verifyOwnership.
+    if (id !== req.user!.schoolId) {
+      return res.status(403).json({ message: "You do not have access to this resource" });
+    }
+    const school = await storage.getSchool(id);
     if (!school) return res.status(404).json({ message: "School not found" });
     return res.json(school);
   });
 
   // ─── Compliance ────────────────────────────────────
-  app.get("/api/compliance", authMiddleware, (req, res) => {
-    const items = storage.getComplianceItems(req.user!.schoolId);
-    const score = storage.getComplianceScore(req.user!.schoolId);
+  app.get("/api/compliance", authMiddleware, async (req, res) => {
+    const items = await storage.getComplianceItems(req.user!.schoolId);
+    const score = await storage.getComplianceScore(req.user!.schoolId);
     return res.json({ items, score });
   });
 
-  app.put("/api/compliance/:id", authMiddleware, (req, res) => {
-    const updated = storage.updateComplianceItem(Number(req.params.id), req.body);
-    if (!updated) return res.status(404).json({ message: "Item not found" });
+  app.put(
+    "/api/compliance/:id",
+    authMiddleware,
+    requireRole("admin", "dpo"),
+    validateBody(updateComplianceSchema),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const owned = await verifyOwnership(
+        req,
+        res,
+        () => storage.getComplianceItem(id),
+        "Item not found",
+      );
+      if (!owned) return;
 
-    storage.createAuditEntry({
-      schoolId: req.user!.schoolId,
+      const updated = await storage.updateComplianceItem(id, req.body);
+      if (!updated) return res.status(404).json({ message: "Item not found" });
+
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "compliance_update",
+        entityType: "compliance",
+        entityId: id,
+        details: `Updated status to ${req.body.status ?? "modified"}`,
+      });
+
+      return res.json(updated);
+    },
+  );
+
+  // ─── Compliance Evidence ───────────────────────────
+  // List evidence files attached to a compliance item in the caller's school.
+  app.get(
+    "/api/compliance/:id/evidence",
+    authMiddleware,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const owned = await verifyOwnership(
+        req,
+        res,
+        () => storage.getComplianceItem(id),
+        "Item not found",
+      );
+      if (!owned) return;
+
+      return res.json(await storage.getComplianceEvidence(id));
+    },
+  );
+
+  // Upload an evidence file for a compliance item in the caller's school.
+  // Ownership is checked BEFORE the file is persisted so a cross-school upload
+  // never writes a file to disk. multer runs first to parse the multipart body;
+  // its size/type limits are enforced in server/uploads.ts, and any error is
+  // mapped to a 400.
+  app.post(
+    "/api/compliance/:id/evidence",
+    authMiddleware,
+    requireRole("admin", "dpo"),
+    (req, res, next) => {
+      evidenceUpload.single("file")(req, res, (err: any) => {
+        if (err) {
+          if (err.code === "LIMIT_FILE_SIZE") {
+            return res.status(400).json({
+              message: `File exceeds the maximum size of ${UPLOAD_MAX_BYTES} bytes`,
+            });
+          }
+          return res.status(400).json({ message: "File upload failed" });
+        }
+        next();
+      });
+    },
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const file = req.file;
+
+      // Remove any uploaded temp file if ownership/validation fails below.
+      const cleanup = () => {
+        if (file?.path) {
+          fs.rm(file.path, { force: true }, () => undefined);
+        }
+      };
+
+      const owned = await verifyOwnership(
+        req,
+        res,
+        () => storage.getComplianceItem(id),
+        "Item not found",
+      );
+      if (!owned) {
+        cleanup();
+        return;
+      }
+
+      if (!file) {
+        return res.status(400).json({
+          message: `A file is required (allowed types: ${ALLOWED_MIME_TYPES.join(", ")})`,
+        });
+      }
+
+      const evidence = await storage.createComplianceEvidence({
+        complianceItemId: id,
+        schoolId: req.user!.schoolId,
+        filename: file.filename,
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        uploadedBy: req.user!.id,
+      });
+
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "evidence_uploaded",
+        entityType: "compliance",
+        entityId: id,
+        details: `Uploaded evidence ${file.originalname}`,
+      });
+
+      return res.status(201).json(evidence);
+    },
+  );
+
+  // ─── Reports Export ────────────────────────────────
+  // Export the caller's school compliance status + score and incident summary
+  // as CSV or PDF. Always scoped to req.user.schoolId; format defaults to csv.
+  app.get("/api/reports/export", authMiddleware, async (req, res) => {
+    const format = String(req.query.format || "csv").toLowerCase();
+    if (format !== "csv" && format !== "pdf") {
+      return res.status(400).json({ message: "format must be csv or pdf" });
+    }
+
+    const schoolId = req.user!.schoolId;
+    const school = await storage.getSchool(schoolId);
+    const items = await storage.getComplianceItems(schoolId);
+    const complianceScore = await storage.getComplianceScore(schoolId);
+    const incidents = await storage.getIncidents(schoolId);
+
+    const data = {
+      schoolName: school?.name ?? `School ${schoolId}`,
+      complianceScore,
+      compliance: items.map((i: any) => ({
+        title: i.title,
+        status: i.status,
+        weight: i.weight ?? 5,
+      })),
+      incidents: incidents.map((i: any) => ({
+        type: i.type,
+        severity: i.severity,
+        status: i.status,
+      })),
+    };
+
+    await storage.createAuditEntry({
+      schoolId,
       userId: req.user!.id,
-      action: "compliance_update",
-      entityType: "compliance",
-      entityId: Number(req.params.id),
-      details: `Updated status to ${req.body.status}`,
+      action: "report_exported",
+      entityType: "report",
+      entityId: schoolId,
+      details: `Exported ${format.toUpperCase()} compliance report`,
     });
 
-    return res.json(updated);
+    if (format === "csv") {
+      const csv = buildComplianceCsv(data);
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        'attachment; filename="harmonyshield-report.csv"',
+      );
+      return res.status(200).send(csv);
+    }
+
+    const pdf = await buildCompliancePdf(data);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="harmonyshield-report.pdf"',
+    );
+    return res.status(200).send(pdf);
   });
 
   // ─── Threats ───────────────────────────────────────
   app.get("/api/threats", authMiddleware, async (_req, res) => {
     try {
-      const seedThreats = storage.getThreats();
+      const seedThreats = await storage.getThreats();
       let liveThreats: any[] = [];
       try {
         const otx = await fetchOTXThreats();
@@ -640,98 +929,170 @@ export async function registerRoutes(
       const seedWithFlag = seedThreats.map(t => ({ ...t, isLive: false }));
       return res.json([...liveThreats, ...seedWithFlag]);
     } catch (err) {
-      return res.json(storage.getThreats().map(t => ({ ...t, isLive: false })));
+      const fallback = await storage.getThreats();
+      return res.json(fallback.map(t => ({ ...t, isLive: false })));
     }
   });
 
-  app.get("/api/threats/stats", authMiddleware, (_req, res) => {
-    return res.json(storage.getThreatStats());
+  app.get("/api/threats/stats", authMiddleware, async (_req, res) => {
+    return res.json(await storage.getThreatStats());
   });
 
   app.get("/api/ip-check/:ip", authMiddleware, async (req, res) => {
-    const result = await checkIPReputation(req.params.ip);
-    if (!result) return res.status(500).json({ message: "IP check failed" });
+    const result = await checkIPReputation(String(req.params.ip));
+    if (!result.available) {
+      // 503: the live reputation source is not configured/available. Never
+      // return fabricated numbers.
+      return res.status(503).json(result);
+    }
     return res.json(result);
   });
 
   // ─── Incidents ─────────────────────────────────────
-  app.get("/api/incidents", authMiddleware, (req, res) => {
-    return res.json(storage.getIncidents(req.user!.schoolId));
+  app.get("/api/incidents", authMiddleware, async (req, res) => {
+    return res.json(await storage.getIncidents(req.user!.schoolId));
   });
 
-  app.get("/api/incidents/:id", authMiddleware, (req, res) => {
-    const incident = storage.getIncident(Number(req.params.id));
-    if (!incident) return res.status(404).json({ message: "Incident not found" });
-    const actions = storage.getIncidentActions(incident.id);
+  app.get("/api/incidents/:id", authMiddleware, async (req, res) => {
+    const id = Number(req.params.id);
+    const incident = await verifyOwnership(
+      req,
+      res,
+      () => storage.getIncident(id),
+      "Incident not found",
+    );
+    if (!incident) return;
+
+    const actions = await storage.getIncidentActions(incident.id);
     return res.json({ ...incident, actions });
   });
 
-  app.post("/api/incidents", authMiddleware, (req, res) => {
-    const incident = storage.createIncident({
-      ...req.body,
-      schoolId: req.user!.schoolId,
-    });
+  app.post(
+    "/api/incidents",
+    authMiddleware,
+    requireRole("admin", "dpo", "staff", "teacher"),
+    validateBody(createIncidentSchema),
+    async (req, res) => {
+      const incident = await storage.createIncident({
+        ...req.body,
+        schoolId: req.user!.schoolId, // server-injected ownership
+      });
 
-    storage.createAuditEntry({
-      schoolId: req.user!.schoolId,
-      userId: req.user!.id,
-      action: "incident_created",
-      entityType: "incident",
-      entityId: incident.id,
-      details: `New ${incident.type} incident reported`,
-    });
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "incident_created",
+        entityType: "incident",
+        entityId: incident.id,
+        details: `New ${incident.type} incident reported`,
+      });
 
-    return res.json(incident);
-  });
+      return res.status(201).json(incident);
+    },
+  );
 
-  app.put("/api/incidents/:id", authMiddleware, (req, res) => {
-    const updated = storage.updateIncident(Number(req.params.id), req.body);
-    if (!updated) return res.status(404).json({ message: "Incident not found" });
+  app.put(
+    "/api/incidents/:id",
+    authMiddleware,
+    requireRole("admin", "dpo", "staff", "teacher"),
+    validateBody(updateIncidentSchema),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const owned = await verifyOwnership(
+        req,
+        res,
+        () => storage.getIncident(id),
+        "Incident not found",
+      );
+      if (!owned) return;
 
-    storage.createAuditEntry({
-      schoolId: req.user!.schoolId,
-      userId: req.user!.id,
-      action: "incident_updated",
-      entityType: "incident",
-      entityId: Number(req.params.id),
-      details: `Updated incident status to ${req.body.status || 'modified'}`,
-    });
+      const updated = await storage.updateIncident(id, req.body);
+      if (!updated) return res.status(404).json({ message: "Incident not found" });
 
-    return res.json(updated);
-  });
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "incident_updated",
+        entityType: "incident",
+        entityId: id,
+        details: `Updated incident status to ${req.body.status || "modified"}`,
+      });
+
+      return res.json(updated);
+    },
+  );
 
   // ─── Incident Actions ──────────────────────────────
-  app.post("/api/incidents/:id/actions", authMiddleware, (req, res) => {
-    const action = storage.createIncidentAction({
-      ...req.body,
-      incidentId: Number(req.params.id),
-    });
-    return res.json(action);
-  });
+  app.post(
+    "/api/incidents/:id/actions",
+    authMiddleware,
+    requireRole("admin", "dpo", "staff", "teacher"),
+    validateBody(createIncidentActionSchema),
+    async (req, res) => {
+      const incidentId = Number(req.params.id);
+      // Ownership flows through the parent incident's schoolId.
+      const incident = await verifyOwnership(
+        req,
+        res,
+        () => storage.getIncident(incidentId),
+        "Incident not found",
+      );
+      if (!incident) return;
 
-  app.put("/api/incident-actions/:id", authMiddleware, (req, res) => {
-    const updated = storage.updateIncidentAction(Number(req.params.id), req.body);
-    if (!updated) return res.status(404).json({ message: "Action not found" });
-    return res.json(updated);
-  });
+      const action = await storage.createIncidentAction({
+        ...req.body,
+        incidentId,
+      });
+      return res.status(201).json(action);
+    },
+  );
+
+  app.put(
+    "/api/incident-actions/:id",
+    authMiddleware,
+    requireRole("admin", "dpo", "staff", "teacher"),
+    validateBody(updateIncidentActionSchema),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      // Resolve the action, then its parent incident, to check ownership.
+      const action = await storage.getIncidentAction(id);
+      if (!action) return res.status(404).json({ message: "Action not found" });
+
+      const incident = await verifyOwnership(
+        req,
+        res,
+        () => storage.getIncident(action.incidentId),
+        "Action not found",
+      );
+      if (!incident) return;
+
+      const updated = await storage.updateIncidentAction(id, req.body);
+      if (!updated) return res.status(404).json({ message: "Action not found" });
+      return res.json(updated);
+    },
+  );
 
   // ─── Training ──────────────────────────────────────
-  app.get("/api/training/courses", authMiddleware, (_req, res) => {
-    return res.json(storage.getCourses());
+  app.get("/api/training/courses", authMiddleware, async (_req, res) => {
+    return res.json(await storage.getCourses());
   });
 
-  app.get("/api/training/courses/:id", authMiddleware, (req, res) => {
-    const course = storage.getCourse(Number(req.params.id));
+  app.get("/api/training/courses/:id", authMiddleware, async (req, res) => {
+    const course = await storage.getCourse(Number(req.params.id));
     if (!course) return res.status(404).json({ message: "Course not found" });
     return res.json(course);
   });
 
-  app.get("/api/training/progress", authMiddleware, (req, res) => {
-    return res.json(storage.getTrainingProgress(req.user!.id));
+  app.get("/api/training/progress", authMiddleware, async (req, res) => {
+    return res.json(await storage.getTrainingProgress(req.user!.id));
   });
 
-  app.post("/api/training/progress", authMiddleware, (req, res) => {
-    const progress = storage.upsertTrainingProgress({
+  app.post(
+    "/api/training/progress",
+    authMiddleware,
+    validateBody(trainingProgressSchema),
+    async (req, res) => {
+    const progress = await storage.upsertTrainingProgress({
       userId: req.user!.id,
       courseId: req.body.courseId,
       status: req.body.status,
@@ -739,7 +1100,7 @@ export async function registerRoutes(
     });
 
     if (req.body.status === "completed") {
-      storage.createAuditEntry({
+      await storage.createAuditEntry({
         schoolId: req.user!.schoolId,
         userId: req.user!.id,
         action: "training_completed",
@@ -750,12 +1111,13 @@ export async function registerRoutes(
     }
 
     return res.json(progress);
-  });
+    },
+  );
 
   // ─── News ──────────────────────────────────────────
   app.get("/api/news", authMiddleware, async (_req, res) => {
     try {
-      const seedNews = storage.getNewsArticles();
+      const seedNews = await storage.getNewsArticles();
       let liveNews: any[] = [];
       try {
         liveNews = await fetchLiveNews();
@@ -765,18 +1127,19 @@ export async function registerRoutes(
       const seedWithFlag = seedNews.map(n => ({ ...n, isLive: false }));
       return res.json([...liveNews.slice(0, 10), ...seedWithFlag]);
     } catch {
-      return res.json(storage.getNewsArticles().map(n => ({ ...n, isLive: false })));
+      const fallback = await storage.getNewsArticles();
+      return res.json(fallback.map(n => ({ ...n, isLive: false })));
     }
   });
 
   // ─── Users ─────────────────────────────────────────
-  app.get("/api/users", authMiddleware, (req, res) => {
-    return res.json(storage.getUsers(req.user!.schoolId));
+  app.get("/api/users", authMiddleware, async (req, res) => {
+    return res.json(await storage.getUsers(req.user!.schoolId));
   });
 
   // ─── Audit ─────────────────────────────────────────
-  app.get("/api/audit", authMiddleware, (req, res) => {
-    return res.json(storage.getAuditLog(req.user!.schoolId));
+  app.get("/api/audit", authMiddleware, async (req, res) => {
+    return res.json(await storage.getAuditLog(req.user!.schoolId));
   });
 
   // ─── Feed Status ───────────────────────────────────
@@ -785,27 +1148,33 @@ export async function registerRoutes(
   });
 
   // ─── Settings ──────────────────────────────────────
-  app.get("/api/settings", authMiddleware, (req, res) => {
-    const school = storage.getSchool(req.user!.schoolId);
+  app.get("/api/settings", authMiddleware, async (req, res) => {
+    const school = await storage.getSchool(req.user!.schoolId);
     if (!school) return res.status(404).json({ message: "School not found" });
     return res.json(school);
   });
 
-  app.put("/api/settings", authMiddleware, (req, res) => {
-    const updated = storage.updateSchool(req.user!.schoolId, req.body);
-    if (!updated) return res.status(404).json({ message: "School not found" });
+  app.put(
+    "/api/settings",
+    authMiddleware,
+    requireRole("admin", "dpo"),
+    validateBody(updateSettingsSchema),
+    async (req, res) => {
+      const updated = await storage.updateSchool(req.user!.schoolId, req.body);
+      if (!updated) return res.status(404).json({ message: "School not found" });
 
-    storage.createAuditEntry({
-      schoolId: req.user!.schoolId,
-      userId: req.user!.id,
-      action: "settings_update",
-      entityType: "school",
-      entityId: req.user!.schoolId,
-      details: "Updated school settings",
-    });
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "settings_update",
+        entityType: "school",
+        entityId: req.user!.schoolId,
+        details: "Updated school settings",
+      });
 
-    return res.json(updated);
-  });
+      return res.json(updated);
+    },
+  );
 
   return httpServer;
 }

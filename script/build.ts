@@ -3,7 +3,14 @@ import { build as viteBuild } from "vite";
 import { rm, readFile } from "fs/promises";
 
 // server deps to bundle to reduce openat(2) syscalls
-// which helps cold start times
+// which helps cold start times.
+//
+// NOTE: pdfkit is intentionally NOT in this allowlist. It resolves its bundled
+// font/ICC data files at runtime via `new URL('./data/...', ...)` relative to
+// its own package location, which breaks when inlined into dist/index.cjs
+// (the relative paths no longer exist). Keeping it external means it loads from
+// node_modules with its data files intact. Its deps are in `dependencies`, so
+// `npm ci --omit=dev` on the server still installs it.
 const allowlist = [
   "@google/generative-ai",
   "axios",
@@ -13,6 +20,7 @@ const allowlist = [
   "drizzle-zod",
   "express",
   "express-rate-limit",
+  "helmet",
   "express-session",
   "jsonwebtoken",
   "memorystore",

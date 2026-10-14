@@ -47,11 +47,20 @@ cp .env.example .env
 Edit `.env` with your values:
 
 ```env
-# REQUIRED for production — use a long random string (32+ characters)
+# REQUIRED for production — use a long random string (32+ characters).
+# The server will REFUSE TO START in production if this is missing or shorter
+# than 32 characters. It never falls back to a default secret in production.
 JWT_SECRET=your-very-long-random-secret-string-here
+
+# OPTIONAL — comma-separated list of allowed CORS origins (empty = same-origin only)
+ALLOWED_ORIGINS=
 
 # OPTIONAL — enhances threat intelligence feeds
 OTX_API_KEY=your-otx-api-key
+
+# OPTIONAL — required for live IP reputation checks. Without it, the
+# /api/ip-check endpoint reports reputation as unavailable (503) and returns
+# no simulated data.
 ABUSEIPDB_API_KEY=your-abuseipdb-api-key
 
 # Server port (most platforms set this automatically)
@@ -273,7 +282,7 @@ For a split deployment (free frontend hosting + separate backend):
 ### Frontend on Vercel
 
 1. Fork/clone the repo
-2. Modify `client/src/lib/queryClient.ts` to point to your Railway backend URL
+2. Set `VITE_API_BASE` to your Railway backend URL (e.g. `https://your-app.railway.app`) in the Vercel build environment. The SPA reads this at build time; no source edits are needed. Leave it unset for the default same-origin single-port model.
 3. Deploy only the `client/` folder to Vercel
 4. Set the build output to `dist/public`
 
@@ -288,7 +297,18 @@ For a split deployment (free frontend hosting + separate backend):
 
 ## 7. PostgreSQL Migration
 
-The app ships with SQLite for zero-config setup. Here's how to migrate to PostgreSQL for production scale.
+The app has a **dual-driver storage layer** (`server/storage.ts`). It selects
+its database driver automatically from the `DATABASE_URL` environment variable
+at startup — no code changes are required to switch:
+
+| `DATABASE_URL` | Driver | Schema source | Use case |
+|----------------|--------|---------------|----------|
+| **unset** | `drizzle-orm/better-sqlite3` | `server/db-schema.ts` (`sqliteTable`) | Zero-config dev/test. A local `data.db` is created and seeded automatically. |
+| **set** | `drizzle-orm/node-postgres` (`pg` Pool) | `shared/schema.ts` (`pgTable`) | Production. |
+
+Every storage method is `async`, so the same API serves both the synchronous
+SQLite driver and the asynchronous PostgreSQL driver. On startup the server logs
+which driver it chose (`[Storage] Using PostgreSQL driver` / `... SQLite driver`).
 
 ### Step 1: Set Up PostgreSQL
 
@@ -303,67 +323,58 @@ You'll get a connection string like:
 postgresql://user:password@host:5432/database
 ```
 
-### Step 2: Update Environment
+### Step 2: Set the Connection String
 
-Add to your `.env`:
+Add to your production environment (`.env` or your platform's variables):
 ```env
 DATABASE_URL=postgresql://user:password@host:5432/harmonyshield
 ```
 
-### Step 3: Update Database Driver
+Setting this is **all that is needed** to switch the running app to PostgreSQL.
+There are no source edits — the driver branch is already implemented.
 
-In `server/storage.ts`, replace the SQLite setup:
+### Step 3: Apply the Committed Migrations
 
-```typescript
-// BEFORE (SQLite)
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import * as schema from "./db-schema";
-const sqlite = new Database("data.db");
-const db = drizzle(sqlite, { schema });
-
-// AFTER (PostgreSQL)
-import { Pool } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-import * as schema from "../shared/schema";  // Use the pgTable schema
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const db = drizzle(pool, { schema });
-```
-
-### Step 4: Update Drizzle Config
-
-In `drizzle.config.ts`:
-
-```typescript
-import { defineConfig } from "drizzle-kit";
-
-export default defineConfig({
-  schema: "./shared/schema.ts",
-  out: "./drizzle",
-  dialect: "postgresql",
-  dbCredentials: {
-    url: process.env.DATABASE_URL!,
-  },
-});
-```
-
-### Step 5: Push Schema & Seed
+Drizzle migrations for the PostgreSQL schema are generated from
+`shared/schema.ts` and **committed** to the `./migrations` directory. Apply them
+to your database before the first start:
 
 ```bash
-# Push the schema to PostgreSQL
-npx drizzle-kit push
+# Apply the committed SQL migrations in ./migrations
+DATABASE_URL=postgresql://... npm run db:migrate
 
-# The app auto-seeds on first startup
-npm run build
-npm start
+# Alternatively, for a quick first provision, push the schema directly:
+DATABASE_URL=postgresql://... npm run db:push
 ```
+
+If you later change `shared/schema.ts`, regenerate the migration files (this
+needs only the schema, not a live database) and commit the result:
+
+```bash
+npm run db:generate   # writes new SQL into ./migrations
+```
+
+### Step 4: Build, Start, and Seed
+
+```bash
+npm run build
+DATABASE_URL=postgresql://... npm start
+```
+
+The demo-data seed still runs automatically on first startup: when the `schools`
+table is empty the app seeds schools, users (including the demo admin
+`admin@fgcenugu.edu.ng` / `demo123`), compliance items, threats, incidents,
+training courses, news, and audit entries.
 
 ### Important Notes
 
-- The `shared/schema.ts` file already uses `pgTable` — it's production-ready
-- The `server/db-schema.ts` (SQLite version) can be deleted after migration
-- All Drizzle queries in `storage.ts` will need `.then()` or `await` since PostgreSQL is async (SQLite was sync)
-- Update `.get()` calls to use `await` and adjust for async behavior
+- `shared/schema.ts` (the `pgTable` definitions) is the source of truth for the
+  PostgreSQL migrations; `server/db-schema.ts` is the matching `sqliteTable`
+  mirror used only when `DATABASE_URL` is unset.
+- Timestamps are written explicitly as ISO strings in application code, so the
+  schema does not rely on a database-side `now()` default.
+- Keep both schema files in sync when you add or change columns, then run
+  `npm run db:generate` and commit the new migration.
 
 ---
 
@@ -371,12 +382,16 @@ npm start
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `JWT_SECRET` | **Yes** (production) | `harmonyshield-dev-secret` | JWT signing key. Must be unique and secret in production |
+| `JWT_SECRET` | **Yes** (production) | insecure dev fallback (dev only) | JWT signing key (min 32 chars). In production the server refuses to start if it is missing or weak; in development an insecure fallback is used with a warning |
+| `ALLOWED_ORIGINS` | No | — (same-origin only) | Comma-separated list of origins allowed via CORS |
 | `PORT` | No | `5000` | HTTP port. Most platforms set this automatically |
 | `NODE_ENV` | No | `development` | Set to `production` for production builds |
 | `OTX_API_KEY` | No | — | AlienVault OTX API key for enhanced threat feeds |
-| `ABUSEIPDB_API_KEY` | No | — | AbuseIPDB key for live IP reputation checks |
-| `DATABASE_URL` | No | — | PostgreSQL connection string (only if migrating from SQLite) |
+| `ABUSEIPDB_API_KEY` | No | — | AbuseIPDB key for live IP reputation checks. Without it, `/api/ip-check` reports reputation as unavailable (503) with no simulated data |
+| `DATABASE_URL` | No | — (SQLite) | PostgreSQL connection string. When set, the app uses the PostgreSQL driver; when unset it uses the zero-config SQLite driver. See [PostgreSQL Migration](#7-postgresql-migration) |
+| `UPLOAD_DIR` | No | `./uploads` | Directory where compliance evidence files are written. Gitignored. On ephemeral filesystems (e.g. Render free tier) point this at a mounted persistent volume |
+| `UPLOAD_MAX_BYTES` | No | `5242880` (5 MiB) | Maximum accepted evidence file size in bytes. Oversized uploads are rejected with `400` |
+| `VITE_API_BASE` | No | — (same-origin) | Build-time API base URL baked into the SPA. Leave empty for the default single-port, same-origin serving model; set it only for a split frontend/backend deployment (Option 6) |
 
 ### Getting Free API Keys
 
@@ -422,16 +437,44 @@ certbot renew --dry-run
 
 ### Health Check
 
-The app exposes a status endpoint:
+The app exposes a public, unauthenticated health endpoint that is intentionally
+served outside `/api` (so it is never throttled by the API rate limiter) and
+performs a lightweight database readiness check:
+
 ```bash
-curl https://your-domain.com/api/live/status
+curl https://your-domain.com/healthz
+# -> 200 {"status":"ok","uptime":123.4,"timestamp":"...","db":"up"}
+# -> 503 {"status":"degraded",...,"db":"down"} if the DB is unreachable
 ```
 
+Use `/healthz` for load-balancer / orchestrator liveness and readiness probes.
+It never returns secrets. (The live-feed status is a separate concern - see
+`GET /api/feeds/status`.)
+
 ### Logs
+
+The server emits **structured JSON** request logs (one line per `/api` request)
+with `timestamp`, `method`, `path`, `status`, `durationMs` and a per-request
+`requestId` (also returned to clients in the `X-Request-Id` response header).
+Response bodies are never logged, so JWTs and passwords from `/api/auth/*` are
+not leaked into the logs.
 
 - **Railway/Render**: Check the dashboard logs
 - **VPS with PM2**: `pm2 logs harmonyshield-pro`
 - **VPS Nginx**: `tail -f /var/log/nginx/access.log`
+
+### Optional error tracking
+
+Unhandled errors flow through a single hook that is a **no-op by default**.
+Set either of these environment variables to enable reporting:
+
+- `ERROR_WEBHOOK` - a URL that receives a JSON `POST` per unhandled error
+  (`{ message, stack, context, timestamp }`, no secrets). Delivery is
+  best-effort and failures never affect the response.
+- `SENTRY_DSN` - when set, errors are emitted as structured JSON log lines
+  tagged for a log drain / Sentry sidecar to forward. (No Sentry SDK is bundled;
+  add it to `package.json` and the esbuild allowlist in `script/build.ts` if you
+  want native delivery.)
 
 ### Database Backup (SQLite)
 
@@ -451,6 +494,26 @@ pm2 start harmonyshield-pro
 ```bash
 pg_dump $DATABASE_URL > backup_$(date +%Y%m%d).sql
 ```
+
+### Evidence Uploads & Report Export
+
+- **Evidence uploads**: admins/DPOs can attach evidence files to a compliance
+  item via `POST /api/compliance/:id/evidence` (`multipart/form-data`, field
+  `file`). Files are written to `UPLOAD_DIR` (default `./uploads`, gitignored)
+  with an opaque random on-disk name; the original filename and metadata are
+  stored in the `compliance_evidence` table. Uploads are size-limited
+  (`UPLOAD_MAX_BYTES`, default 5 MiB) and restricted to a conservative MIME
+  allowlist (PDF, common images, text/CSV, Office documents). Uploads are
+  ownership-checked, so a user can only attach evidence to a compliance item in
+  their own school. **Back up `UPLOAD_DIR` alongside the database**, and on
+  platforms with ephemeral disks (Render free tier, some container hosts) point
+  `UPLOAD_DIR` at a persistent volume so evidence survives redeploys.
+- **Report export**: `GET /api/reports/export?format=csv|pdf` returns the
+  caller's school compliance status + weighted score and incident summary. CSV
+  is built dependency-free; PDF is rendered with `pdfkit`. `pdfkit` is kept
+  **external** from the esbuild server bundle (it loads its font/ICC data files
+  at runtime relative to its own package), so ensure production installs
+  `dependencies` (`npm ci` / `npm install`, not `--omit` of `pdfkit`).
 
 ### Updating
 
@@ -490,8 +553,8 @@ echo $NODE_ENV
 
 - RSS feeds work without any API keys
 - OTX: check that `OTX_API_KEY` is valid (or it falls back to public API)
-- AbuseIPDB: without a key, IP checks return simulated data
-- Check the feed status: `GET /api/live/status`
+- AbuseIPDB: without a key, `GET /api/ip-check/:ip` returns `503` with `available:false` and **no** simulated data
+- Check the feed status: `GET /api/feeds/status`
 
 ### SQLite "database is locked" errors
 
@@ -521,7 +584,8 @@ Before going live, verify:
 
 - [ ] `JWT_SECRET` is set to a unique, long random string (not the default)
 - [ ] `NODE_ENV` is set to `production`
-- [ ] Live feeds are working (`/api/live/status`)
+- [ ] Health check responds (`GET /healthz` returns 200)
+- [ ] Live feeds are working (`/api/feeds/status`)
 - [ ] Login works with demo credentials
 - [ ] SSL certificate is active (HTTPS)
 - [ ] Custom domain is configured (if applicable)

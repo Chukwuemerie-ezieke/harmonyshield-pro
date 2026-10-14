@@ -29,8 +29,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (name: string, email: string, password: string, schoolId?: number) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 export const AuthContext = createContext<AuthContextType | null>(null);
@@ -64,27 +63,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [setAuthState]);
 
-  const register = useCallback(async (name: string, email: string, password: string, schoolId?: number) => {
-    setIsLoading(true);
+  // Note: user registration is an admin-only, authenticated operation on the
+  // server (POST /api/auth/register returns 201 { user } with no token), so
+  // there is no public self-service signup path in this context.
+
+  const logout = useCallback(async () => {
+    // Best-effort server-side revocation before clearing local state. If the
+    // call fails (offline, already-expired token, etc.) we still clear the
+    // local token so the user is logged out client-side regardless.
     try {
-      const res = await apiRequest("POST", "/api/auth/register", {
-        name, email, password, schoolId: schoolId || 1, role: "staff",
-      });
-      const data = await res.json();
-      setAuthState(data.token, data.user);
-      queryClient.clear();
+      await apiRequest("POST", "/api/auth/logout");
+    } catch {
+      // ignore - local logout proceeds regardless
     } finally {
-      setIsLoading(false);
+      setAuthState(null, null);
+      queryClient.clear();
     }
   }, [setAuthState]);
 
-  const logout = useCallback(() => {
-    setAuthState(null, null);
-    queryClient.clear();
-  }, [setAuthState]);
-
   return (
-    <AuthContext.Provider value={{ user, token, isAuthenticated: !!token && !!user, isLoading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, token, isAuthenticated: !!token && !!user, isLoading, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

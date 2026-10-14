@@ -1,5 +1,5 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/queryClient";
+import { getAuthToken } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,27 @@ const severityColors: Record<string, string> = {
 
 const CHART_COLORS = ["hsl(0, 84%, 42%)", "hsl(25, 95%, 53%)", "hsl(38, 92%, 50%)", "hsl(217, 55%, 55%)", "hsl(160, 84%, 39%)"];
 
+interface IPReputationLive {
+  available: true;
+  source: "live";
+  ip: string;
+  abuseConfidenceScore: number;
+  countryCode: string;
+  isp: string;
+  totalReports: number;
+  lastReportedAt: string | null;
+  isWhitelisted: boolean;
+  riskLevel: string;
+}
+
+interface IPReputationUnavailable {
+  available: false;
+  source: "unavailable";
+  message: string;
+}
+
+type IPReputationResult = IPReputationLive | IPReputationUnavailable;
+
 export default function ThreatMonitor() {
   const [severityFilter, setSeverityFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -34,15 +55,23 @@ export default function ThreatMonitor() {
     queryKey: ["/api/threats/stats"],
   });
 
-  const ipCheckMutation = useMutation({
+  const ipCheckMutation = useMutation<IPReputationResult, Error, string>({
     mutationFn: async (ip: string) => {
-      const res = await apiRequest("GET", `/api/ip-check/${ip}`);
-      return res.json();
+      // Note: a 503 (reputation source unavailable) carries a structured JSON
+      // body, so parse it directly instead of relying on apiRequest's throw.
+      const token = getAuthToken();
+      const res = await fetch(`/api/ip-check/${ip}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.status === 401) {
+        throw new Error("Authentication required");
+      }
+      return (await res.json()) as IPReputationResult;
     },
   });
 
   const allThreats = threats || [];
-  const types = [...new Set(allThreats.map(t => t.type))];
+  const types = Array.from(new Set(allThreats.map(t => t.type)));
 
   const filtered = allThreats.filter(t => {
     if (severityFilter !== "all" && t.severity !== severityFilter) return false;
@@ -251,7 +280,17 @@ export default function ThreatMonitor() {
                 </Button>
               </div>
 
-              {ipCheckMutation.data && (
+              {ipCheckMutation.data && !ipCheckMutation.data.available && (
+                <div
+                  className="p-3 rounded-lg border bg-muted/40 text-xs flex items-start gap-2"
+                  data-testid="ip-result-unavailable"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-muted-foreground" />
+                  <span className="text-muted-foreground">{ipCheckMutation.data.message}</span>
+                </div>
+              )}
+
+              {ipCheckMutation.data && ipCheckMutation.data.available && (
                 <div className="p-3 rounded-lg border bg-card text-xs space-y-1" data-testid="ip-result">
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">IP</span>

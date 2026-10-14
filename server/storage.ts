@@ -1,244 +1,344 @@
-import type {
-  School, InsertSchool,
-  User, InsertUser,
-  ComplianceItem, InsertComplianceItem,
-  Threat, InsertThreat,
-  Incident, InsertIncident,
-  IncidentAction, InsertIncidentAction,
-  TrainingCourse,
-  TrainingProgress,
-  NewsArticle,
-  AuditLogEntry,
-  Session,
-} from "@shared/schema";
-
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { eq, and, desc } from "drizzle-orm";
+import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
+import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
 import Database from "better-sqlite3";
-import { eq, and, sql, desc, count } from "drizzle-orm";
-import {
+import { Pool } from "pg";
+import * as sqliteSchema from "./db-schema";
+import * as pgSchema from "@shared/schema";
+
+/**
+ * Dual-driver storage layer.
+ *
+ * HarmonyShield Pro runs on SQLite by default (zero-config dev/test) and on
+ * PostgreSQL in production when DATABASE_URL is provided. The driver is chosen
+ * once at module load:
+ *
+ *   - DATABASE_URL set  -> drizzle-orm/node-postgres with the pgTable schema
+ *                          from shared/schema.ts (async query API).
+ *   - DATABASE_URL unset -> drizzle-orm/better-sqlite3 with the sqliteTable
+ *                          schema from server/db-schema.ts (sync query API).
+ *
+ * Every public storage method is `async` so the single IStorage interface
+ * serves both drivers: SQLite's synchronous results are simply returned from an
+ * async method (and therefore wrapped in a resolved Promise), while the
+ * node-postgres calls are awaited.
+ *
+ * The two dialects expose different table objects and different query
+ * terminators (SQLite uses .get()/.all()/.run(); node-postgres returns arrays
+ * from awaited builders). We isolate those differences in a small `exec` helper
+ * and a single `schema`/`db` pair, so the method bodies read the same for both
+ * drivers.
+ */
+
+const usePostgres = Boolean(process.env.DATABASE_URL);
+
+// A single schema/db pair that the rest of the file references. The concrete
+// table objects differ by dialect but share identical column names, so the
+// drizzle query builder calls below are structurally identical.
+type Schema = typeof sqliteSchema;
+
+let db: any;
+let schema: Schema;
+
+if (usePostgres) {
+  // ─── PostgreSQL (production) ──────────────────────────
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  db = drizzlePg(pool, { schema: pgSchema });
+  // The pgTable objects share column names with the sqliteTable mirror, so the
+  // query-building code below is identical across dialects.
+  schema = pgSchema as unknown as Schema;
+  console.log("[Storage] Using PostgreSQL driver (DATABASE_URL set)");
+} else {
+  // ─── SQLite (default dev/test) ────────────────────────
+  // The SQLite file path defaults to `data.db` but can be overridden via
+  // SQLITE_PATH (or DATABASE_FILE) so the test suite can point at an isolated,
+  // throwaway database and never clobber the dev `data.db`. Use ":memory:" for
+  // an in-memory database.
+  const sqlitePath = process.env.SQLITE_PATH || process.env.DATABASE_FILE || "data.db";
+  const sqlite = new Database(sqlitePath);
+  sqlite.pragma("journal_mode = WAL");
+  db = drizzleSqlite(sqlite);
+  schema = sqliteSchema;
+
+  // Create all tables for the SQLite dev/test runtime. On PostgreSQL the schema
+  // is created via committed Drizzle migrations (see migrations/ and
+  // DEPLOYMENT_GUIDE.md) rather than at runtime.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS schools (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      address TEXT,
+      state TEXT,
+      lga TEXT,
+      type TEXT NOT NULL DEFAULT 'secondary',
+      student_count INTEGER DEFAULT 0,
+      ndpc_reg_number TEXT,
+      created_at TEXT NOT NULL DEFAULT 'now()'
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      school_id INTEGER NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      password TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'staff',
+      department TEXT,
+      created_at TEXT NOT NULL DEFAULT 'now()'
+    );
+
+    CREATE TABLE IF NOT EXISTS compliance_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      school_id INTEGER NOT NULL,
+      item_key TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'not_started',
+      weight INTEGER DEFAULT 5,
+      due_date TEXT,
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS threats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      severity TEXT NOT NULL DEFAULT 'medium',
+      type TEXT NOT NULL DEFAULT 'malware',
+      published_at TEXT NOT NULL,
+      country TEXT,
+      is_education_sector INTEGER DEFAULT 0,
+      ioc_data TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS incidents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      school_id INTEGER NOT NULL,
+      reported_by TEXT NOT NULL,
+      type TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      step INTEGER DEFAULT 1,
+      description TEXT NOT NULL,
+      affected_systems TEXT,
+      affected_count INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS incident_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      incident_id INTEGER NOT NULL,
+      action TEXT NOT NULL,
+      performed_by TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      notes TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS training_courses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      duration_min INTEGER DEFAULT 30,
+      icon TEXT,
+      content_md TEXT,
+      quiz_json TEXT,
+      pass_mark INTEGER DEFAULT 70
+    );
+
+    CREATE TABLE IF NOT EXISTS training_progress (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      course_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'not_started',
+      score INTEGER,
+      started_at TEXT,
+      completed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS news_articles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      source TEXT NOT NULL,
+      url TEXT,
+      summary TEXT,
+      published_at TEXT NOT NULL,
+      keywords TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      school_id INTEGER,
+      user_id INTEGER,
+      action TEXT NOT NULL,
+      entity_type TEXT,
+      entity_id INTEGER,
+      details TEXT,
+      timestamp TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      token TEXT NOT NULL UNIQUE,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS compliance_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      compliance_item_id INTEGER NOT NULL,
+      school_id INTEGER NOT NULL,
+      filename TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      uploaded_by INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  console.log("[Storage] Using SQLite driver (DATABASE_URL not set)");
+}
+
+export { db };
+
+// ─── Dialect-agnostic query terminators ───────────────
+// better-sqlite3 drizzle builders are synchronous and terminate with
+// .get()/.all()/.run(); node-postgres builders are thenables that resolve to a
+// result set. These helpers normalize both into Promises.
+
+/** Return the first row (or undefined) from a select/insert/update builder. */
+async function first<T = any>(builder: any): Promise<T | undefined> {
+  if (usePostgres) {
+    const rows = await builder;
+    return (rows as T[])[0];
+  }
+  return builder.get() as T | undefined;
+}
+
+/** Return all rows from a select builder. */
+async function many<T = any>(builder: any): Promise<T[]> {
+  if (usePostgres) {
+    const rows = await builder;
+    return rows as T[];
+  }
+  return builder.all() as T[];
+}
+
+/** Execute a statement without caring about the result (e.g. deletes). */
+async function run(builder: any): Promise<void> {
+  if (usePostgres) {
+    await builder;
+    return;
+  }
+  builder.run();
+}
+
+const {
   schools, users, complianceItems, threats, incidents, incidentActions,
   trainingCourses, trainingProgress, newsArticles, auditLog, sessions,
-} from "./db-schema";
-
-const sqlite = new Database("data.db");
-sqlite.pragma("journal_mode = WAL");
-export const db = drizzle(sqlite);
-
-// Create all tables
-sqlite.exec(`
-  CREATE TABLE IF NOT EXISTS schools (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    address TEXT,
-    state TEXT,
-    lga TEXT,
-    type TEXT NOT NULL DEFAULT 'secondary',
-    student_count INTEGER DEFAULT 0,
-    ndpc_reg_number TEXT,
-    created_at TEXT NOT NULL DEFAULT 'now()'
-  );
-
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    school_id INTEGER NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    password TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'staff',
-    department TEXT,
-    created_at TEXT NOT NULL DEFAULT 'now()'
-  );
-
-  CREATE TABLE IF NOT EXISTS compliance_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    school_id INTEGER NOT NULL,
-    item_key TEXT NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT,
-    status TEXT NOT NULL DEFAULT 'not_started',
-    weight INTEGER DEFAULT 5,
-    due_date TEXT,
-    updated_at TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS threats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source TEXT NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT,
-    severity TEXT NOT NULL DEFAULT 'medium',
-    type TEXT NOT NULL DEFAULT 'malware',
-    published_at TEXT NOT NULL,
-    country TEXT,
-    is_education_sector INTEGER DEFAULT 0,
-    ioc_data TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS incidents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    school_id INTEGER NOT NULL,
-    reported_by TEXT NOT NULL,
-    type TEXT NOT NULL,
-    severity TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',
-    step INTEGER DEFAULT 1,
-    description TEXT NOT NULL,
-    affected_systems TEXT,
-    affected_count INTEGER DEFAULT 0,
-    created_at TEXT NOT NULL,
-    resolved_at TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS incident_actions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    incident_id INTEGER NOT NULL,
-    action TEXT NOT NULL,
-    performed_by TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    notes TEXT,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS training_courses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT,
-    duration_min INTEGER DEFAULT 30,
-    icon TEXT,
-    content_md TEXT,
-    quiz_json TEXT,
-    pass_mark INTEGER DEFAULT 70
-  );
-
-  CREATE TABLE IF NOT EXISTS training_progress (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    course_id INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'not_started',
-    score INTEGER,
-    started_at TEXT,
-    completed_at TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS news_articles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    source TEXT NOT NULL,
-    url TEXT,
-    summary TEXT,
-    published_at TEXT NOT NULL,
-    keywords TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    school_id INTEGER,
-    user_id INTEGER,
-    action TEXT NOT NULL,
-    entity_type TEXT,
-    entity_id INTEGER,
-    details TEXT,
-    timestamp TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    token TEXT NOT NULL UNIQUE,
-    expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  );
-`);
+  complianceEvidence,
+} = schema;
 
 export interface IStorage {
   // Schools
-  getSchools(): any[];
-  getSchool(id: number): any | undefined;
-  createSchool(data: any): any;
-  updateSchool(id: number, data: Partial<any>): any | undefined;
+  getSchools(): Promise<any[]>;
+  getSchool(id: number): Promise<any | undefined>;
+  createSchool(data: any): Promise<any>;
+  updateSchool(id: number, data: Partial<any>): Promise<any | undefined>;
 
   // Users
-  getUser(id: number): any | undefined;
-  getUserByEmail(email: string): any | undefined;
-  getUsers(schoolId: number): any[];
-  createUser(data: any): any;
+  getUser(id: number): Promise<any | undefined>;
+  getUserByEmail(email: string): Promise<any | undefined>;
+  getUsers(schoolId: number): Promise<any[]>;
+  createUser(data: any): Promise<any>;
 
   // Compliance
-  getComplianceItems(schoolId: number): any[];
-  getComplianceScore(schoolId: number): number;
-  updateComplianceItem(id: number, data: Partial<any>): any | undefined;
+  getComplianceItems(schoolId: number): Promise<any[]>;
+  getComplianceItem(id: number): Promise<any | undefined>;
+  getComplianceScore(schoolId: number): Promise<number>;
+  createComplianceItem(data: any): Promise<any>;
+  updateComplianceItem(id: number, data: Partial<any>): Promise<any | undefined>;
+
+  // Compliance Evidence
+  getComplianceEvidence(complianceItemId: number): Promise<any[]>;
+  createComplianceEvidence(data: any): Promise<any>;
 
   // Threats
-  getThreats(): any[];
-  getThreatStats(): { total: number; critical: number; high: number; medium: number; low: number };
-  createThreat(data: any): any;
+  getThreats(): Promise<any[]>;
+  getThreatStats(): Promise<{ total: number; critical: number; high: number; medium: number; low: number }>;
+  createThreat(data: any): Promise<any>;
 
   // Incidents
-  getIncidents(schoolId: number): any[];
-  getIncident(id: number): any | undefined;
-  createIncident(data: any): any;
-  updateIncident(id: number, data: Partial<any>): any | undefined;
+  getIncidents(schoolId: number): Promise<any[]>;
+  getIncident(id: number): Promise<any | undefined>;
+  createIncident(data: any): Promise<any>;
+  updateIncident(id: number, data: Partial<any>): Promise<any | undefined>;
 
   // Incident Actions
-  getIncidentActions(incidentId: number): any[];
-  createIncidentAction(data: any): any;
-  updateIncidentAction(id: number, data: Partial<any>): any | undefined;
+  getIncidentActions(incidentId: number): Promise<any[]>;
+  getIncidentAction(id: number): Promise<any | undefined>;
+  createIncidentAction(data: any): Promise<any>;
+  updateIncidentAction(id: number, data: Partial<any>): Promise<any | undefined>;
 
   // Training
-  getCourses(): any[];
-  getCourse(id: number): any | undefined;
-  getTrainingProgress(userId: number): any[];
-  upsertTrainingProgress(data: { userId: number; courseId: number; status: string; score?: number }): any;
+  getCourses(): Promise<any[]>;
+  getCourse(id: number): Promise<any | undefined>;
+  createCourse(data: any): Promise<any>;
+  getTrainingProgress(userId: number): Promise<any[]>;
+  upsertTrainingProgress(data: { userId: number; courseId: number; status: string; score?: number }): Promise<any>;
 
   // News
-  getNewsArticles(): any[];
-  createNewsArticle(data: any): any;
+  getNewsArticles(): Promise<any[]>;
+  createNewsArticle(data: any): Promise<any>;
 
   // Audit
-  getAuditLog(schoolId: number): any[];
-  createAuditEntry(data: any): any;
+  getAuditLog(schoolId: number): Promise<any[]>;
+  createAuditEntry(data: any): Promise<any>;
 
   // Sessions
-  createSession(data: any): any;
-  getSession(token: string): any | undefined;
-  deleteSession(token: string): void;
+  createSession(data: any): Promise<any>;
+  getSession(token: string): Promise<any | undefined>;
+  deleteSession(token: string): Promise<void>;
 
   // Dashboard
-  getDashboardStats(schoolId: number, userId: number): any;
+  getDashboardStats(schoolId: number, userId: number): Promise<any>;
 }
 
 export class DatabaseStorage implements IStorage {
   // ─── Schools ───────────────────────────────────────
-  getSchools() {
-    return db.select().from(schools).all();
+  async getSchools() {
+    return many(db.select().from(schools));
   }
 
-  getSchool(id: number) {
-    return db.select().from(schools).where(eq(schools.id, id)).get();
+  async getSchool(id: number) {
+    return first(db.select().from(schools).where(eq(schools.id, id)));
   }
 
-  createSchool(data: any) {
-    return db.insert(schools).values({
+  async createSchool(data: any) {
+    return first(db.insert(schools).values({
       ...data,
       createdAt: new Date().toISOString(),
-    }).returning().get();
+    }).returning());
   }
 
-  updateSchool(id: number, data: Partial<any>) {
-    return db.update(schools).set(data).where(eq(schools.id, id)).returning().get();
+  async updateSchool(id: number, data: Partial<any>) {
+    return first(db.update(schools).set(data).where(eq(schools.id, id)).returning());
   }
 
   // ─── Users ─────────────────────────────────────────
-  getUser(id: number) {
-    return db.select().from(users).where(eq(users.id, id)).get();
+  async getUser(id: number) {
+    return first(db.select().from(users).where(eq(users.id, id)));
   }
 
-  getUserByEmail(email: string) {
-    return db.select().from(users).where(eq(users.email, email)).get();
+  async getUserByEmail(email: string) {
+    return first(db.select().from(users).where(eq(users.email, email)));
   }
 
-  getUsers(schoolId: number) {
-    return db.select({
+  async getUsers(schoolId: number) {
+    return many(db.select({
       id: users.id,
       schoolId: users.schoolId,
       email: users.email,
@@ -246,23 +346,27 @@ export class DatabaseStorage implements IStorage {
       role: users.role,
       department: users.department,
       createdAt: users.createdAt,
-    }).from(users).where(eq(users.schoolId, schoolId)).all();
+    }).from(users).where(eq(users.schoolId, schoolId)));
   }
 
-  createUser(data: any) {
-    return db.insert(users).values({
+  async createUser(data: any) {
+    return first(db.insert(users).values({
       ...data,
       createdAt: new Date().toISOString(),
-    }).returning().get();
+    }).returning());
   }
 
   // ─── Compliance ────────────────────────────────────
-  getComplianceItems(schoolId: number) {
-    return db.select().from(complianceItems).where(eq(complianceItems.schoolId, schoolId)).all();
+  async getComplianceItems(schoolId: number) {
+    return many(db.select().from(complianceItems).where(eq(complianceItems.schoolId, schoolId)));
   }
 
-  getComplianceScore(schoolId: number) {
-    const items = this.getComplianceItems(schoolId);
+  async getComplianceItem(id: number) {
+    return first(db.select().from(complianceItems).where(eq(complianceItems.id, id)));
+  }
+
+  async getComplianceScore(schoolId: number) {
+    const items = await this.getComplianceItems(schoolId);
     if (items.length === 0) return 0;
     const totalWeight = items.reduce((sum, i) => sum + (i.weight || 5), 0);
     const completedWeight = items
@@ -274,20 +378,41 @@ export class DatabaseStorage implements IStorage {
     return Math.round(((completedWeight + partialWeight) / totalWeight) * 100);
   }
 
-  updateComplianceItem(id: number, data: Partial<any>) {
-    return db.update(complianceItems).set({
+  async createComplianceItem(data: any) {
+    return first(db.insert(complianceItems).values({
+      ...data,
+      updatedAt: data.updatedAt ?? new Date().toISOString(),
+    }).returning());
+  }
+
+  async updateComplianceItem(id: number, data: Partial<any>) {
+    return first(db.update(complianceItems).set({
       ...data,
       updatedAt: new Date().toISOString(),
-    }).where(eq(complianceItems.id, id)).returning().get();
+    }).where(eq(complianceItems.id, id)).returning());
+  }
+
+  // ─── Compliance Evidence ───────────────────────────
+  async getComplianceEvidence(complianceItemId: number) {
+    return many(db.select().from(complianceEvidence)
+      .where(eq(complianceEvidence.complianceItemId, complianceItemId))
+      .orderBy(desc(complianceEvidence.createdAt)));
+  }
+
+  async createComplianceEvidence(data: any) {
+    return first(db.insert(complianceEvidence).values({
+      ...data,
+      createdAt: new Date().toISOString(),
+    }).returning());
   }
 
   // ─── Threats ───────────────────────────────────────
-  getThreats() {
-    return db.select().from(threats).orderBy(desc(threats.publishedAt)).all();
+  async getThreats() {
+    return many(db.select().from(threats).orderBy(desc(threats.publishedAt)));
   }
 
-  getThreatStats() {
-    const all = this.getThreats();
+  async getThreatStats() {
+    const all = await this.getThreats();
     return {
       total: all.length,
       critical: all.filter(t => t.severity === "critical").length,
@@ -297,132 +422,140 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  createThreat(data: any) {
-    return db.insert(threats).values(data).returning().get();
+  async createThreat(data: any) {
+    return first(db.insert(threats).values(data).returning());
   }
 
   // ─── Incidents ─────────────────────────────────────
-  getIncidents(schoolId: number) {
-    return db.select().from(incidents).where(eq(incidents.schoolId, schoolId)).orderBy(desc(incidents.createdAt)).all();
+  async getIncidents(schoolId: number) {
+    return many(db.select().from(incidents).where(eq(incidents.schoolId, schoolId)).orderBy(desc(incidents.createdAt)));
   }
 
-  getIncident(id: number) {
-    return db.select().from(incidents).where(eq(incidents.id, id)).get();
+  async getIncident(id: number) {
+    return first(db.select().from(incidents).where(eq(incidents.id, id)));
   }
 
-  createIncident(data: any) {
-    return db.insert(incidents).values({
+  async createIncident(data: any) {
+    return first(db.insert(incidents).values({
       ...data,
       createdAt: new Date().toISOString(),
-    }).returning().get();
+    }).returning());
   }
 
-  updateIncident(id: number, data: Partial<any>) {
-    return db.update(incidents).set(data).where(eq(incidents.id, id)).returning().get();
+  async updateIncident(id: number, data: Partial<any>) {
+    return first(db.update(incidents).set(data).where(eq(incidents.id, id)).returning());
   }
 
   // ─── Incident Actions ──────────────────────────────
-  getIncidentActions(incidentId: number) {
-    return db.select().from(incidentActions).where(eq(incidentActions.incidentId, incidentId)).orderBy(desc(incidentActions.createdAt)).all();
+  async getIncidentActions(incidentId: number) {
+    return many(db.select().from(incidentActions).where(eq(incidentActions.incidentId, incidentId)).orderBy(desc(incidentActions.createdAt)));
   }
 
-  createIncidentAction(data: any) {
-    return db.insert(incidentActions).values({
+  async getIncidentAction(id: number) {
+    return first(db.select().from(incidentActions).where(eq(incidentActions.id, id)));
+  }
+
+  async createIncidentAction(data: any) {
+    return first(db.insert(incidentActions).values({
       ...data,
       createdAt: new Date().toISOString(),
-    }).returning().get();
+    }).returning());
   }
 
-  updateIncidentAction(id: number, data: Partial<any>) {
-    return db.update(incidentActions).set(data).where(eq(incidentActions.id, id)).returning().get();
+  async updateIncidentAction(id: number, data: Partial<any>) {
+    return first(db.update(incidentActions).set(data).where(eq(incidentActions.id, id)).returning());
   }
 
   // ─── Training ──────────────────────────────────────
-  getCourses() {
-    return db.select().from(trainingCourses).all();
+  async getCourses() {
+    return many(db.select().from(trainingCourses));
   }
 
-  getCourse(id: number) {
-    return db.select().from(trainingCourses).where(eq(trainingCourses.id, id)).get();
+  async getCourse(id: number) {
+    return first(db.select().from(trainingCourses).where(eq(trainingCourses.id, id)));
   }
 
-  getTrainingProgress(userId: number) {
-    return db.select().from(trainingProgress).where(eq(trainingProgress.userId, userId)).all();
+  async createCourse(data: any) {
+    return first(db.insert(trainingCourses).values(data).returning());
   }
 
-  upsertTrainingProgress(data: { userId: number; courseId: number; status: string; score?: number }) {
-    const existing = db.select().from(trainingProgress)
+  async getTrainingProgress(userId: number) {
+    return many(db.select().from(trainingProgress).where(eq(trainingProgress.userId, userId)));
+  }
+
+  async upsertTrainingProgress(data: { userId: number; courseId: number; status: string; score?: number }) {
+    const existing = await first<any>(db.select().from(trainingProgress)
       .where(and(
         eq(trainingProgress.userId, data.userId),
         eq(trainingProgress.courseId, data.courseId)
-      )).get();
+      )));
 
     if (existing) {
-      return db.update(trainingProgress).set({
+      return first(db.update(trainingProgress).set({
         status: data.status,
         score: data.score ?? existing.score,
         completedAt: data.status === "completed" ? new Date().toISOString() : existing.completedAt,
-      }).where(eq(trainingProgress.id, existing.id)).returning().get();
+      }).where(eq(trainingProgress.id, existing.id)).returning());
     } else {
-      return db.insert(trainingProgress).values({
+      return first(db.insert(trainingProgress).values({
         userId: data.userId,
         courseId: data.courseId,
         status: data.status,
         score: data.score ?? null,
         startedAt: new Date().toISOString(),
         completedAt: data.status === "completed" ? new Date().toISOString() : null,
-      }).returning().get();
+      }).returning());
     }
   }
 
   // ─── News ──────────────────────────────────────────
-  getNewsArticles() {
-    return db.select().from(newsArticles).orderBy(desc(newsArticles.publishedAt)).all();
+  async getNewsArticles() {
+    return many(db.select().from(newsArticles).orderBy(desc(newsArticles.publishedAt)));
   }
 
-  createNewsArticle(data: any) {
-    return db.insert(newsArticles).values(data).returning().get();
+  async createNewsArticle(data: any) {
+    return first(db.insert(newsArticles).values(data).returning());
   }
 
   // ─── Audit ─────────────────────────────────────────
-  getAuditLog(schoolId: number) {
-    return db.select().from(auditLog).where(eq(auditLog.schoolId, schoolId)).orderBy(desc(auditLog.timestamp)).all();
+  async getAuditLog(schoolId: number) {
+    return many(db.select().from(auditLog).where(eq(auditLog.schoolId, schoolId)).orderBy(desc(auditLog.timestamp)));
   }
 
-  createAuditEntry(data: any) {
-    return db.insert(auditLog).values({
+  async createAuditEntry(data: any) {
+    return first(db.insert(auditLog).values({
       ...data,
       timestamp: new Date().toISOString(),
-    }).returning().get();
+    }).returning());
   }
 
   // ─── Sessions ──────────────────────────────────────
-  createSession(data: any) {
-    return db.insert(sessions).values({
+  async createSession(data: any) {
+    return first(db.insert(sessions).values({
       ...data,
       createdAt: new Date().toISOString(),
-    }).returning().get();
+    }).returning());
   }
 
-  getSession(token: string) {
-    return db.select().from(sessions).where(eq(sessions.token, token)).get();
+  async getSession(token: string) {
+    return first(db.select().from(sessions).where(eq(sessions.token, token)));
   }
 
-  deleteSession(token: string) {
-    db.delete(sessions).where(eq(sessions.token, token)).run();
+  async deleteSession(token: string) {
+    await run(db.delete(sessions).where(eq(sessions.token, token)));
   }
 
   // ─── Dashboard ─────────────────────────────────────
-  getDashboardStats(schoolId: number, userId: number) {
-    const complianceScore = this.getComplianceScore(schoolId);
-    const allThreats = this.getThreats();
+  async getDashboardStats(schoolId: number, userId: number) {
+    const complianceScore = await this.getComplianceScore(schoolId);
+    const allThreats = await this.getThreats();
     const activeThreats = allThreats.filter(t => t.severity === "critical" || t.severity === "high").length;
-    const schoolIncidents = this.getIncidents(schoolId);
+    const schoolIncidents = await this.getIncidents(schoolId);
     const activeIncidents = schoolIncidents.filter(i => i.status !== "resolved" && i.status !== "closed").length;
 
     // Training completion
-    const allCourses = this.getCourses();
-    const userProgress = this.getTrainingProgress(userId);
+    const allCourses = await this.getCourses();
+    const userProgress = await this.getTrainingProgress(userId);
     const completedCourses = userProgress.filter(p => p.status === "completed").length;
     const trainingCompletion = allCourses.length > 0
       ? Math.round((completedCourses / allCourses.length) * 100)
@@ -438,7 +571,7 @@ export class DatabaseStorage implements IStorage {
       totalCourses: allCourses.length,
       completedCourses,
       recentIncidents: schoolIncidents.slice(0, 5),
-      threatStats: this.getThreatStats(),
+      threatStats: await this.getThreatStats(),
     };
   }
 }

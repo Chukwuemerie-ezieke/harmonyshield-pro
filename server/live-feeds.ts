@@ -200,7 +200,7 @@ function mapOTXPulses(pulses: any[]): OTXThreat[] {
 }
 
 // ─── AbuseIPDB IP Reputation ─────────────────────────
-export interface IPReputationResult {
+export interface IPReputationData {
   ip: string;
   abuseConfidenceScore: number;
   countryCode: string;
@@ -211,31 +211,37 @@ export interface IPReputationResult {
   riskLevel: string;
 }
 
-export async function checkIPReputation(ip: string): Promise<IPReputationResult | null> {
+/** Live reputation data retrieved from AbuseIPDB. */
+export interface IPReputationLive extends IPReputationData {
+  available: true;
+  source: "live";
+}
+
+/** Reputation data is unavailable (no API key, or the upstream call failed). */
+export interface IPReputationUnavailable {
+  available: false;
+  source: "unavailable";
+  message: string;
+}
+
+export type IPReputationResult = IPReputationLive | IPReputationUnavailable;
+
+const IP_UNAVAILABLE_NO_KEY: IPReputationUnavailable = {
+  available: false,
+  source: "unavailable",
+  message: "IP reputation unavailable - ABUSEIPDB_API_KEY not configured",
+};
+
+export async function checkIPReputation(ip: string): Promise<IPReputationResult> {
+  const apiKey = process.env.ABUSEIPDB_API_KEY;
+  if (!apiKey) {
+    // No API key: signal unavailability instead of fabricating random data.
+    return IP_UNAVAILABLE_NO_KEY;
+  }
+
   const cacheKey = `ip-${ip}`;
   const cached = getCached<IPReputationResult>(cacheKey);
   if (cached) return cached;
-
-  const apiKey = process.env.ABUSEIPDB_API_KEY;
-  if (!apiKey) {
-    // Return mock data when no API key
-    const mockResult: IPReputationResult = {
-      ip,
-      abuseConfidenceScore: Math.floor(Math.random() * 100),
-      countryCode: "NG",
-      isp: "MTN Nigeria",
-      totalReports: Math.floor(Math.random() * 50),
-      lastReportedAt: new Date().toISOString(),
-      isWhitelisted: false,
-      riskLevel: "medium",
-    };
-    mockResult.riskLevel =
-      mockResult.abuseConfidenceScore > 75 ? "critical" :
-      mockResult.abuseConfidenceScore > 50 ? "high" :
-      mockResult.abuseConfidenceScore > 25 ? "medium" : "low";
-    setCache(cacheKey, mockResult);
-    return mockResult;
-  }
 
   try {
     const response = await fetch(
@@ -251,13 +257,19 @@ export async function checkIPReputation(ip: string): Promise<IPReputationResult 
 
     if (!response.ok) {
       console.error("[LiveFeeds] AbuseIPDB error:", response.status);
-      return null;
+      return {
+        available: false,
+        source: "unavailable",
+        message: `IP reputation unavailable - AbuseIPDB returned ${response.status}`,
+      };
     }
 
     const json = await response.json();
     const d = json.data;
 
-    const result: IPReputationResult = {
+    const result: IPReputationLive = {
+      available: true,
+      source: "live",
       ip: d.ipAddress,
       abuseConfidenceScore: d.abuseConfidenceScore,
       countryCode: d.countryCode,
@@ -275,7 +287,11 @@ export async function checkIPReputation(ip: string): Promise<IPReputationResult 
     return result;
   } catch (err) {
     console.error("[LiveFeeds] AbuseIPDB fetch error:", (err as Error).message);
-    return null;
+    return {
+      available: false,
+      source: "unavailable",
+      message: "IP reputation unavailable - the AbuseIPDB request failed",
+    };
   }
 }
 
