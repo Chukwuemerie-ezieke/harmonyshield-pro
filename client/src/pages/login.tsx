@@ -8,12 +8,10 @@ import { Shield, Eye, EyeOff, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 export default function Login() {
-  const { login, register, isLoading } = useAuth();
+  const { login, isLoading } = useAuth();
   const { toast } = useToast();
-  const [isRegister, setIsRegister] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
 
@@ -21,13 +19,8 @@ export default function Login() {
     e.preventDefault();
     setError("");
     try {
-      if (isRegister) {
-        await register(name, email, password);
-        toast({ title: "Account created", description: "Welcome to HarmonyShield Pro!" });
-      } else {
-        await login(email, password);
-        toast({ title: "Welcome back", description: "Successfully logged in." });
-      }
+      await login(email, password);
+      toast({ title: "Welcome back", description: "Successfully logged in." });
     } catch (err: any) {
       const msg = err.message?.includes("401") ? "Invalid email or password" : err.message || "Login failed";
       setError(msg);
@@ -37,7 +30,6 @@ export default function Login() {
   const fillDemo = () => {
     setEmail("admin@fgcenugu.edu.ng");
     setPassword("demo123");
-    setIsRegister(false);
   };
 
   return (
@@ -54,28 +46,10 @@ export default function Login() {
 
         <Card className="border-white/10 bg-white/5 backdrop-blur-sm">
           <CardHeader className="pb-4">
-            <h2 className="text-lg font-medium text-white text-center">
-              {isRegister ? "Create Account" : "Sign In"}
-            </h2>
+            <h2 className="text-lg font-medium text-white text-center">Sign In</h2>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
-              {isRegister && (
-                <div className="space-y-2">
-                  <Label htmlFor="name" className="text-gray-300">Full Name</Label>
-                  <Input
-                    id="name"
-                    data-testid="input-name"
-                    type="text"
-                    placeholder="Chukwuemeka Okafor"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    className="bg-white/10 border-white/20 text-white placeholder:text-gray-500"
-                    required
-                  />
-                </div>
-              )}
-
               <div className="space-y-2">
                 <Label htmlFor="email" className="text-gray-300">Email Address</Label>
                 <Input
@@ -129,38 +103,24 @@ export default function Login() {
                 {isLoading ? (
                   <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    {isRegister ? "Creating Account..." : "Signing In..."}
+                    Signing In...
                   </>
                 ) : (
-                  isRegister ? "Create Account" : "Sign In"
+                  "Sign In"
                 )}
               </Button>
             </form>
 
             {/* Demo credentials */}
-            {!isRegister && (
-              <div className="mt-4 p-3 rounded-lg bg-primary/10 border border-primary/20">
-                <p className="text-xs text-gray-400 mb-1">Demo Credentials</p>
-                <button
-                  type="button"
-                  data-testid="button-fill-demo"
-                  className="text-xs text-primary hover:underline cursor-pointer"
-                  onClick={fillDemo}
-                >
-                  admin@fgcenugu.edu.ng / demo123
-                </button>
-              </div>
-            )}
-
-            {/* Toggle register/login */}
-            <div className="mt-4 text-center">
+            <div className="mt-4 p-3 rounded-lg bg-primary/10 border border-primary/20">
+              <p className="text-xs text-gray-400 mb-1">Demo Credentials</p>
               <button
                 type="button"
-                data-testid="button-toggle-auth-mode"
-                className="text-sm text-gray-400 hover:text-primary transition-colors"
-                onClick={() => { setIsRegister(!isRegister); setError(""); }}
+                data-testid="button-fill-demo"
+                className="text-xs text-primary hover:underline cursor-pointer"
+                onClick={fillDemo}
               >
-                {isRegister ? "Already have an account? Sign in" : "Need an account? Register"}
+                admin@fgcenugu.edu.ng / demo123
               </button>
             </div>
           </CardContent>

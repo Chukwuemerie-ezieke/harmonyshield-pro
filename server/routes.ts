@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { z } from "zod";
 import { storage } from "./storage";
-import { hashPassword, verifyPassword, generateToken, verifyToken, authMiddleware, hasActiveSession } from "./auth";
+import { hashPassword, verifyPassword, generateToken, verifyToken, authMiddleware } from "./auth";
 import { requireRole, verifyOwnership } from "./authz";
 import { validateBody } from "./validate";
 import { fetchLiveNews, fetchOTXThreats, checkIPReputation, getFeedStatus } from "./live-feeds";
@@ -58,7 +58,10 @@ const trainingProgressSchema = z.object({
 });
 
 // PUT /api/settings - a school admin may edit their own school's details.
-const updateSettingsSchema = insertSchoolSchema.partial();
+// createdAt is server-owned, so drop it here to prevent an admin/dpo from
+// rewriting their own school's creation timestamp. (id is already omitted by
+// insertSchoolSchema.)
+const updateSettingsSchema = insertSchoolSchema.omit({ createdAt: true }).partial();
 
 // Session lifetime. Must match the JWT expiry in server/auth.ts (7 days) so a
 // session row never outlives the signature it guards.
@@ -645,24 +648,11 @@ export async function registerRoutes(
   );
 
   // ─── Auth: Get Current User ────────────────────────
-  app.get("/api/auth/me", async (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ message: "Not authenticated" });
-    }
-
-    const token = authHeader.split(" ")[1];
-    const decoded = verifyToken(token);
-    if (!decoded) {
-      return res.status(401).json({ message: "Invalid token" });
-    }
-
-    // Honor server-side revocation: a logged-out token must not resolve a user.
-    if (!(await hasActiveSession(decoded.jti))) {
-      return res.status(401).json({ message: "Session expired or revoked" });
-    }
-
-    const user = await storage.getUser(decoded.id);
+  // Reuse authMiddleware for the shared JWT-signature + active-session
+  // (revocation) check so there is a single source of truth; this route only
+  // adds the user-still-exists lookup on top of req.user.
+  app.get("/api/auth/me", authMiddleware, async (req, res) => {
+    const user = await storage.getUser(req.user!.id);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
