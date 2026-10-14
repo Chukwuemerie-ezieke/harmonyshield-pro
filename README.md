@@ -71,14 +71,15 @@ HarmonyShield Pro addresses the growing cybersecurity challenges facing Nigerian
 
 ---
 
-## Database Schema (11 Tables)
+## Database Schema (12 Tables)
 
 | Table | Purpose |
 |-------|---------|
 | `schools` | School profiles with NDPC registration |
 | `users` | User accounts with bcrypt-hashed passwords |
-| `sessions` | JWT session tokens |
+| `sessions` | Server-side session rows keyed by JWT `jti` (enables logout/revocation) |
 | `compliance_items` | NDPR compliance checklist per school |
+| `compliance_evidence` | Uploaded evidence files attached to compliance items |
 | `threats` | Stored threat intelligence records |
 | `incidents` | Security incident reports |
 | `incident_actions` | Actions taken during incident response |
@@ -141,6 +142,9 @@ The app will be running at `http://localhost:5000`.
 | `ABUSEIPDB_API_KEY` | No | AbuseIPDB API key — enables live IP reputation checks. Without it, `/api/ip-check` reports reputation as unavailable (no simulated data). Get one free at [abuseipdb.com](https://www.abuseipdb.com) |
 | `ERROR_WEBHOOK` | No | URL that receives a JSON `POST` for each unhandled server error (no secrets). Default: error tracking is a no-op |
 | `SENTRY_DSN` | No | When set, unhandled errors are emitted as structured JSON log lines tagged for a Sentry sidecar / log drain. Default: no-op |
+| `UPLOAD_DIR` | No | Directory for compliance evidence uploads (default `./uploads`, gitignored) |
+| `UPLOAD_MAX_BYTES` | No | Max evidence file size in bytes (default `5242880`, i.e. 5 MiB) |
+| `VITE_API_BASE` | No | Build-time API base URL for the SPA. Empty (default) = same-origin single-port serving |
 | `PORT` | No | Server port (defaults to 5000) |
 | `NODE_ENV` | No | `development` or `production` |
 
@@ -208,11 +212,18 @@ harmonyshield-pro/
 │   │   └── main.tsx                 # React entry point
 │   └── index.html
 ├── server/
-│   ├── auth.ts                      # JWT + bcrypt auth utilities
+│   ├── app.ts                       # createApp(): Express middleware stack + routes (shared by prod + tests)
+│   ├── auth.ts                      # JWT + bcrypt auth utilities + session revocation
+│   ├── authz.ts                     # Role + per-school ownership guards
+│   ├── validate.ts                  # Zod body-validation middleware
+│   ├── rate-limit.ts                # API + auth rate limiters
+│   ├── observability.ts             # Error-tracking hook (ERROR_WEBHOOK / SENTRY_DSN)
+│   ├── uploads.ts                   # Multer evidence-upload config (size/type limits)
+│   ├── reports.ts                   # CSV + PDF report builders
 │   ├── db-schema.ts                 # SQLite runtime schema (mirrors pg schema)
 │   ├── live-feeds.ts                # RSS, OTX, AbuseIPDB integrations
 │   ├── routes.ts                    # All API routes + seed data
-│   ├── storage.ts                   # Drizzle ORM CRUD operations
+│   ├── storage.ts                   # Dual-driver (SQLite/PostgreSQL) Drizzle CRUD
 │   ├── index.ts                     # Express server entry
 │   ├── static.ts                    # Static file serving (production)
 │   └── vite.ts                      # Vite dev server integration
@@ -239,6 +250,7 @@ harmonyshield-pro/
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/auth/login` | Login with email + password, returns a JWT and creates a server-side session |
+| POST | `/api/auth/register` | Create a user — **admin only** (requires Bearer token); new users are forced into the admin's own school and a safe role allowlist |
 | POST | `/api/auth/logout` | Revoke the current token server-side (deletes its session); the token is rejected afterwards (requires Bearer token) |
 | GET | `/api/auth/sessions` | List the current user's active session (requires Bearer token) |
 | GET | `/api/auth/me` | Get current user from JWT |
@@ -246,26 +258,33 @@ harmonyshield-pro/
 ### Dashboard & Data (all require Bearer token)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/dashboard/stats` | Dashboard summary statistics |
-| GET | `/api/compliance` | Compliance items for user's school |
-| PATCH | `/api/compliance/:id` | Update compliance item status |
+| GET | `/api/dashboard` | Dashboard summary statistics for the user's school |
+| GET | `/api/schools` | List schools |
+| GET | `/api/schools/:id` | Get a single school (own school only) |
+| GET | `/api/compliance` | Compliance items + weighted score for user's school |
+| PUT | `/api/compliance/:id` | Update a compliance item (admin/DPO, ownership-checked) |
+| GET | `/api/compliance/:id/evidence` | List evidence files for a compliance item (ownership-checked) |
+| POST | `/api/compliance/:id/evidence` | Upload an evidence file (`multipart/form-data`, field `file`; admin/DPO, ownership-checked, size/type limited) |
 | GET | `/api/threats` | Stored + live threats |
+| GET | `/api/threats/stats` | Threat counts by severity |
+| GET | `/api/ip-check/:ip` | Check IP reputation via AbuseIPDB (503 when the key is not configured) |
 | GET | `/api/incidents` | Incidents for user's school |
 | POST | `/api/incidents` | Create a new incident |
-| PATCH | `/api/incidents/:id` | Update incident status/step |
+| GET | `/api/incidents/:id` | Get a single incident with its actions (ownership-checked) |
+| PUT | `/api/incidents/:id` | Update incident status/step (ownership-checked) |
+| POST | `/api/incidents/:id/actions` | Add an action to an incident (ownership-checked) |
+| PUT | `/api/incident-actions/:id` | Update an incident action (ownership-checked) |
 | GET | `/api/training/courses` | Available training courses |
+| GET | `/api/training/courses/:id` | Get a single course |
 | GET | `/api/training/progress` | User's training progress |
 | POST | `/api/training/progress` | Start or complete a course |
-| GET | `/api/reports/summary` | Reports data |
-| GET | `/api/settings/school` | School settings |
-
-### Live Feeds (require Bearer token)
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/live/news` | Live RSS news from 4 sources |
-| GET | `/api/live/threats` | Live OTX threat intelligence |
-| POST | `/api/live/check-ip` | Check IP reputation via AbuseIPDB |
-| GET | `/api/live/status` | Feed health status |
+| GET | `/api/news` | Stored + live cybersecurity news |
+| GET | `/api/users` | Users in the caller's school |
+| GET | `/api/audit` | Audit log for the caller's school |
+| GET | `/api/feeds/status` | Live feed health status |
+| GET | `/api/reports/export?format=csv\|pdf` | Export compliance status + score and incident summary for the user's school as CSV or PDF |
+| GET | `/api/settings` | School settings for the caller's school |
+| PUT | `/api/settings` | Update the caller's school settings (admin/DPO) |
 
 ---
 

@@ -282,7 +282,7 @@ For a split deployment (free frontend hosting + separate backend):
 ### Frontend on Vercel
 
 1. Fork/clone the repo
-2. Modify `client/src/lib/queryClient.ts` to point to your Railway backend URL
+2. Set `VITE_API_BASE` to your Railway backend URL (e.g. `https://your-app.railway.app`) in the Vercel build environment. The SPA reads this at build time; no source edits are needed. Leave it unset for the default same-origin single-port model.
 3. Deploy only the `client/` folder to Vercel
 4. Set the build output to `dist/public`
 
@@ -389,6 +389,9 @@ training courses, news, and audit entries.
 | `OTX_API_KEY` | No | — | AlienVault OTX API key for enhanced threat feeds |
 | `ABUSEIPDB_API_KEY` | No | — | AbuseIPDB key for live IP reputation checks. Without it, `/api/ip-check` reports reputation as unavailable (503) with no simulated data |
 | `DATABASE_URL` | No | — (SQLite) | PostgreSQL connection string. When set, the app uses the PostgreSQL driver; when unset it uses the zero-config SQLite driver. See [PostgreSQL Migration](#7-postgresql-migration) |
+| `UPLOAD_DIR` | No | `./uploads` | Directory where compliance evidence files are written. Gitignored. On ephemeral filesystems (e.g. Render free tier) point this at a mounted persistent volume |
+| `UPLOAD_MAX_BYTES` | No | `5242880` (5 MiB) | Maximum accepted evidence file size in bytes. Oversized uploads are rejected with `400` |
+| `VITE_API_BASE` | No | — (same-origin) | Build-time API base URL baked into the SPA. Leave empty for the default single-port, same-origin serving model; set it only for a split frontend/backend deployment (Option 6) |
 
 ### Getting Free API Keys
 
@@ -492,6 +495,26 @@ pm2 start harmonyshield-pro
 pg_dump $DATABASE_URL > backup_$(date +%Y%m%d).sql
 ```
 
+### Evidence Uploads & Report Export
+
+- **Evidence uploads**: admins/DPOs can attach evidence files to a compliance
+  item via `POST /api/compliance/:id/evidence` (`multipart/form-data`, field
+  `file`). Files are written to `UPLOAD_DIR` (default `./uploads`, gitignored)
+  with an opaque random on-disk name; the original filename and metadata are
+  stored in the `compliance_evidence` table. Uploads are size-limited
+  (`UPLOAD_MAX_BYTES`, default 5 MiB) and restricted to a conservative MIME
+  allowlist (PDF, common images, text/CSV, Office documents). Uploads are
+  ownership-checked, so a user can only attach evidence to a compliance item in
+  their own school. **Back up `UPLOAD_DIR` alongside the database**, and on
+  platforms with ephemeral disks (Render free tier, some container hosts) point
+  `UPLOAD_DIR` at a persistent volume so evidence survives redeploys.
+- **Report export**: `GET /api/reports/export?format=csv|pdf` returns the
+  caller's school compliance status + weighted score and incident summary. CSV
+  is built dependency-free; PDF is rendered with `pdfkit`. `pdfkit` is kept
+  **external** from the esbuild server bundle (it loads its font/ICC data files
+  at runtime relative to its own package), so ensure production installs
+  `dependencies` (`npm ci` / `npm install`, not `--omit` of `pdfkit`).
+
 ### Updating
 
 ```bash
@@ -530,7 +553,7 @@ echo $NODE_ENV
 
 - RSS feeds work without any API keys
 - OTX: check that `OTX_API_KEY` is valid (or it falls back to public API)
-- AbuseIPDB: without a key, IP checks return simulated data
+- AbuseIPDB: without a key, `GET /api/ip-check/:ip` returns `503` with `available:false` and **no** simulated data
 - Check the feed status: `GET /api/feeds/status`
 
 ### SQLite "database is locked" errors

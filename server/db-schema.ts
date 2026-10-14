@@ -134,6 +134,19 @@ export const auditLog = sqliteTable("audit_log", {
   timestamp: text("timestamp").notNull(),
 });
 
+// ─── Compliance Evidence ──────────────────────────────
+export const complianceEvidence = sqliteTable("compliance_evidence", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  complianceItemId: integer("compliance_item_id").notNull(),
+  schoolId: integer("school_id").notNull(),
+  filename: text("filename").notNull(),
+  originalName: text("original_name").notNull(),
+  mimeType: text("mime_type").notNull(),
+  size: integer("size").notNull(),
+  uploadedBy: integer("uploaded_by").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 // ─── Sessions ─────────────────────────────────────────
 export const sessions = sqliteTable("sessions", {
   id: integer("id").primaryKey({ autoIncrement: true }),

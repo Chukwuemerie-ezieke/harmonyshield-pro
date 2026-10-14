@@ -7,6 +7,9 @@ import { requireRole, verifyOwnership } from "./authz";
 import { validateBody } from "./validate";
 import { fetchLiveNews, fetchOTXThreats, checkIPReputation, getFeedStatus } from "./live-feeds";
 import { authLimiter } from "./rate-limit";
+import { evidenceUpload, ALLOWED_MIME_TYPES, UPLOAD_MAX_BYTES } from "./uploads";
+import { buildComplianceCsv, buildCompliancePdf } from "./reports";
+import fs from "fs";
 import {
   insertIncidentSchema,
   insertIncidentActionSchema,
@@ -771,6 +774,156 @@ export async function registerRoutes(
       return res.json(updated);
     },
   );
+
+  // ─── Compliance Evidence ───────────────────────────
+  // List evidence files attached to a compliance item in the caller's school.
+  app.get(
+    "/api/compliance/:id/evidence",
+    authMiddleware,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const owned = await verifyOwnership(
+        req,
+        res,
+        () => storage.getComplianceItem(id),
+        "Item not found",
+      );
+      if (!owned) return;
+
+      return res.json(await storage.getComplianceEvidence(id));
+    },
+  );
+
+  // Upload an evidence file for a compliance item in the caller's school.
+  // Ownership is checked BEFORE the file is persisted so a cross-school upload
+  // never writes a file to disk. multer runs first to parse the multipart body;
+  // its size/type limits are enforced in server/uploads.ts, and any error is
+  // mapped to a 400.
+  app.post(
+    "/api/compliance/:id/evidence",
+    authMiddleware,
+    requireRole("admin", "dpo"),
+    (req, res, next) => {
+      evidenceUpload.single("file")(req, res, (err: any) => {
+        if (err) {
+          if (err.code === "LIMIT_FILE_SIZE") {
+            return res.status(400).json({
+              message: `File exceeds the maximum size of ${UPLOAD_MAX_BYTES} bytes`,
+            });
+          }
+          return res.status(400).json({ message: "File upload failed" });
+        }
+        next();
+      });
+    },
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const file = req.file;
+
+      // Remove any uploaded temp file if ownership/validation fails below.
+      const cleanup = () => {
+        if (file?.path) {
+          fs.rm(file.path, { force: true }, () => undefined);
+        }
+      };
+
+      const owned = await verifyOwnership(
+        req,
+        res,
+        () => storage.getComplianceItem(id),
+        "Item not found",
+      );
+      if (!owned) {
+        cleanup();
+        return;
+      }
+
+      if (!file) {
+        return res.status(400).json({
+          message: `A file is required (allowed types: ${ALLOWED_MIME_TYPES.join(", ")})`,
+        });
+      }
+
+      const evidence = await storage.createComplianceEvidence({
+        complianceItemId: id,
+        schoolId: req.user!.schoolId,
+        filename: file.filename,
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        uploadedBy: req.user!.id,
+      });
+
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "evidence_uploaded",
+        entityType: "compliance",
+        entityId: id,
+        details: `Uploaded evidence ${file.originalname}`,
+      });
+
+      return res.status(201).json(evidence);
+    },
+  );
+
+  // ─── Reports Export ────────────────────────────────
+  // Export the caller's school compliance status + score and incident summary
+  // as CSV or PDF. Always scoped to req.user.schoolId; format defaults to csv.
+  app.get("/api/reports/export", authMiddleware, async (req, res) => {
+    const format = String(req.query.format || "csv").toLowerCase();
+    if (format !== "csv" && format !== "pdf") {
+      return res.status(400).json({ message: "format must be csv or pdf" });
+    }
+
+    const schoolId = req.user!.schoolId;
+    const school = await storage.getSchool(schoolId);
+    const items = await storage.getComplianceItems(schoolId);
+    const complianceScore = await storage.getComplianceScore(schoolId);
+    const incidents = await storage.getIncidents(schoolId);
+
+    const data = {
+      schoolName: school?.name ?? `School ${schoolId}`,
+      complianceScore,
+      compliance: items.map((i: any) => ({
+        title: i.title,
+        status: i.status,
+        weight: i.weight ?? 5,
+      })),
+      incidents: incidents.map((i: any) => ({
+        type: i.type,
+        severity: i.severity,
+        status: i.status,
+      })),
+    };
+
+    await storage.createAuditEntry({
+      schoolId,
+      userId: req.user!.id,
+      action: "report_exported",
+      entityType: "report",
+      entityId: schoolId,
+      details: `Exported ${format.toUpperCase()} compliance report`,
+    });
+
+    if (format === "csv") {
+      const csv = buildComplianceCsv(data);
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        'attachment; filename="harmonyshield-report.csv"',
+      );
+      return res.status(200).send(csv);
+    }
+
+    const pdf = await buildCompliancePdf(data);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="harmonyshield-report.pdf"',
+    );
+    return res.status(200).send(pdf);
+  });
 
   // ─── Threats ───────────────────────────────────────
   app.get("/api/threats", authMiddleware, async (_req, res) => {

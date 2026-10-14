@@ -149,6 +149,22 @@ export const auditLog = pgTable("audit_log", {
 });
 export type AuditLogEntry = typeof auditLog.$inferSelect;
 
+// ─── Compliance Evidence ──────────────────────────────
+export const complianceEvidence = pgTable("compliance_evidence", {
+  id: serial("id").primaryKey(),
+  complianceItemId: integer("compliance_item_id").notNull(),
+  schoolId: integer("school_id").notNull(),
+  filename: text("filename").notNull(),
+  originalName: text("original_name").notNull(),
+  mimeType: text("mime_type").notNull(),
+  size: integer("size").notNull(),
+  uploadedBy: integer("uploaded_by").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+export const insertComplianceEvidenceSchema = createInsertSchema(complianceEvidence).omit({ id: true });
+export type InsertComplianceEvidence = z.infer<typeof insertComplianceEvidenceSchema>;
+export type ComplianceEvidence = typeof complianceEvidence.$inferSelect;
+
 // ─── Sessions ─────────────────────────────────────────
 export const sessions = pgTable("sessions", {
   id: serial("id").primaryKey(),

@@ -25,6 +25,9 @@ export default defineConfig({
       NODE_ENV: "test",
       JWT_SECRET: "test-jwt-secret-value-that-is-long-enough-32plus",
       SQLITE_PATH: path.resolve(__dirname, "tests/.tmp-test.db"),
+      // Evidence uploads land in a throwaway dir cleaned by global-setup, so
+      // the suite never writes into the real ./uploads directory.
+      UPLOAD_DIR: path.resolve(__dirname, "tests/.tmp-uploads"),
     },
     // Run the suite in a single fork so the one shared SQLite DB and the seeded
     // state are consistent across files, and the global rate limiter is not

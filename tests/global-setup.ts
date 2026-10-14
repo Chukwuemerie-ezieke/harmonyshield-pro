@@ -34,10 +34,22 @@ function removeDbFiles() {
   }
 }
 
+// Throwaway upload dir used by the evidence-upload tests (UPLOAD_DIR in
+// vitest.config.ts). Removed around each run so uploaded fixtures never leak.
+const uploadDir = path.resolve(__dirname, ".tmp-uploads");
+
+function removeUploadDir() {
+  if (fs.existsSync(uploadDir)) {
+    fs.rmSync(uploadDir, { recursive: true, force: true });
+  }
+}
+
 export function setup() {
   removeDbFiles();
+  removeUploadDir();
 }
 
 export function teardown() {
   removeDbFiles();
+  removeUploadDir();
 }

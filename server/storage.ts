@@ -186,6 +186,18 @@ if (usePostgres) {
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS compliance_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      compliance_item_id INTEGER NOT NULL,
+      school_id INTEGER NOT NULL,
+      filename TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      uploaded_by INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
   console.log("[Storage] Using SQLite driver (DATABASE_URL not set)");
 }
@@ -227,6 +239,7 @@ async function run(builder: any): Promise<void> {
 const {
   schools, users, complianceItems, threats, incidents, incidentActions,
   trainingCourses, trainingProgress, newsArticles, auditLog, sessions,
+  complianceEvidence,
 } = schema;
 
 export interface IStorage {
@@ -248,6 +261,10 @@ export interface IStorage {
   getComplianceScore(schoolId: number): Promise<number>;
   createComplianceItem(data: any): Promise<any>;
   updateComplianceItem(id: number, data: Partial<any>): Promise<any | undefined>;
+
+  // Compliance Evidence
+  getComplianceEvidence(complianceItemId: number): Promise<any[]>;
+  createComplianceEvidence(data: any): Promise<any>;
 
   // Threats
   getThreats(): Promise<any[]>;
@@ -373,6 +390,20 @@ export class DatabaseStorage implements IStorage {
       ...data,
       updatedAt: new Date().toISOString(),
     }).where(eq(complianceItems.id, id)).returning());
+  }
+
+  // ─── Compliance Evidence ───────────────────────────
+  async getComplianceEvidence(complianceItemId: number) {
+    return many(db.select().from(complianceEvidence)
+      .where(eq(complianceEvidence.complianceItemId, complianceItemId))
+      .orderBy(desc(complianceEvidence.createdAt)));
+  }
+
+  async createComplianceEvidence(data: any) {
+    return first(db.insert(complianceEvidence).values({
+      ...data,
+      createdAt: new Date().toISOString(),
+    }).returning());
   }
 
   // ─── Threats ───────────────────────────────────────
