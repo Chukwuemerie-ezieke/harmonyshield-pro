@@ -42,7 +42,7 @@ export default function ThreatMonitor() {
   });
 
   const allThreats = threats || [];
-  const types = [...new Set(allThreats.map(t => t.type))];
+  const types = Array.from(new Set(allThreats.map(t => t.type)));
 
   const filtered = allThreats.filter(t => {
     if (severityFilter !== "all" && t.severity !== severityFilter) return false;

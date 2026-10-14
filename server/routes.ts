@@ -649,7 +649,7 @@ export async function registerRoutes(
   });
 
   app.get("/api/ip-check/:ip", authMiddleware, async (req, res) => {
-    const result = await checkIPReputation(req.params.ip);
+    const result = await checkIPReputation(String(req.params.ip));
     if (!result) return res.status(500).json({ message: "IP check failed" });
     return res.json(result);
   });
