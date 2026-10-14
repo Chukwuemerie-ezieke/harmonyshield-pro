@@ -50,7 +50,12 @@ if (usePostgres) {
   console.log("[Storage] Using PostgreSQL driver (DATABASE_URL set)");
 } else {
   // ─── SQLite (default dev/test) ────────────────────────
-  const sqlite = new Database("data.db");
+  // The SQLite file path defaults to `data.db` but can be overridden via
+  // SQLITE_PATH (or DATABASE_FILE) so the test suite can point at an isolated,
+  // throwaway database and never clobber the dev `data.db`. Use ":memory:" for
+  // an in-memory database.
+  const sqlitePath = process.env.SQLITE_PATH || process.env.DATABASE_FILE || "data.db";
+  const sqlite = new Database(sqlitePath);
   sqlite.pragma("journal_mode = WAL");
   db = drizzleSqlite(sqlite);
   schema = sqliteSchema;
