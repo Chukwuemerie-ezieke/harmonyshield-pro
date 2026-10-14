@@ -139,8 +139,19 @@ The app will be running at `http://localhost:5000`.
 | `ALLOWED_ORIGINS` | No | Comma-separated list of origins allowed via CORS. Empty = same-origin only (default) |
 | `OTX_API_KEY` | No | AlienVault OTX API key — enhances threat feeds. Get one free at [otx.alienvault.com](https://otx.alienvault.com) |
 | `ABUSEIPDB_API_KEY` | No | AbuseIPDB API key — enables live IP reputation checks. Without it, `/api/ip-check` reports reputation as unavailable (no simulated data). Get one free at [abuseipdb.com](https://www.abuseipdb.com) |
+| `ERROR_WEBHOOK` | No | URL that receives a JSON `POST` for each unhandled server error (no secrets). Default: error tracking is a no-op |
+| `SENTRY_DSN` | No | When set, unhandled errors are emitted as structured JSON log lines tagged for a Sentry sidecar / log drain. Default: no-op |
 | `PORT` | No | Server port (defaults to 5000) |
 | `NODE_ENV` | No | `development` or `production` |
+
+---
+
+## Observability & Sessions
+
+- **Health check**: `GET /healthz` (public, outside auth and rate limiting) returns `{status, uptime, timestamp, db}` and performs a lightweight DB readiness check. Use it for load-balancer probes.
+- **Structured logging**: each `/api` request logs one structured JSON line (`timestamp`, `method`, `path`, `status`, `durationMs`, `requestId`). A `X-Request-Id` header is returned to clients. Response bodies are never logged, so tokens and passwords from `/api/auth/*` are not leaked.
+- **Optional error tracking**: unhandled errors flow through a hook that is a no-op unless `ERROR_WEBHOOK` or `SENTRY_DSN` is set (see the env table above).
+- **Revocable sessions**: logging in creates a server-side session keyed by the JWT's `jti`. `POST /api/auth/logout` deletes that session so the token is rejected on subsequent requests - logout revokes the token server-side, it does not merely clear the client.
 
 ---
 
@@ -219,10 +230,17 @@ harmonyshield-pro/
 
 ## API Endpoints
 
+### Health
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/healthz` | Public liveness/readiness probe (no auth, outside rate limiting). Returns `{status, uptime, timestamp, db}` and performs a lightweight DB check. |
+
 ### Authentication
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/auth/login` | Login with email + password, returns JWT |
+| POST | `/api/auth/login` | Login with email + password, returns a JWT and creates a server-side session |
+| POST | `/api/auth/logout` | Revoke the current token server-side (deletes its session); the token is rejected afterwards (requires Bearer token) |
+| GET | `/api/auth/sessions` | List the current user's active session (requires Bearer token) |
 | GET | `/api/auth/me` | Get current user from JWT |
 
 ### Dashboard & Data (all require Bearer token)

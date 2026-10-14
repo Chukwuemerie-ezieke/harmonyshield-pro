@@ -1,9 +1,12 @@
 import express, { type Express, type Request, Response, NextFunction } from "express";
 import helmet from "helmet";
 import cors from "cors";
+import { randomUUID } from "crypto";
 import { createServer, type Server } from "http";
 import { registerRoutes } from "./routes";
 import { apiLimiter } from "./rate-limit";
+import { storage } from "./storage";
+import { reportError } from "./observability";
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -16,9 +19,39 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
+/**
+ * Emit one structured JSON log line per request. Response bodies are never
+ * logged (they can contain JWTs / passwords for /api/auth/*); only
+ * non-sensitive request metadata and the status/duration are recorded.
+ */
+function logRequest(entry: {
+  method: string;
+  path: string;
+  status: number;
+  durationMs: number;
+  requestId: string;
+}) {
+  console.log(
+    JSON.stringify({
+      level: "info",
+      type: "request",
+      timestamp: new Date().toISOString(),
+      ...entry,
+    }),
+  );
+}
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;
+  }
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      requestId?: string;
+    }
   }
 }
 
@@ -85,39 +118,73 @@ export async function createApp(): Promise<{ app: Express; httpServer: Server }>
 
   app.use(express.urlencoded({ extended: false }));
 
+  // Attach a request id and emit a structured JSON log line on finish. We log
+  // only safe request metadata and the status/duration - NEVER the response
+  // body, which for /api/auth/* contains JWTs and must not be logged.
   app.use((req, res, next) => {
     const start = Date.now();
-    const path = req.path;
-    let capturedJsonResponse: Record<string, any> | undefined = undefined;
-
-    const originalResJson = res.json;
-    res.json = function (bodyJson, ...args) {
-      capturedJsonResponse = bodyJson;
-      return originalResJson.apply(res, [bodyJson, ...args]);
-    };
+    const requestId = randomUUID();
+    req.requestId = requestId;
+    res.setHeader("X-Request-Id", requestId);
 
     res.on("finish", () => {
-      const duration = Date.now() - start;
-      if (path.startsWith("/api")) {
-        let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-        if (capturedJsonResponse) {
-          logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
-        }
-
-        log(logLine);
+      if (req.path.startsWith("/api")) {
+        logRequest({
+          method: req.method,
+          path: req.path,
+          status: res.statusCode,
+          durationMs: Date.now() - start,
+          requestId,
+        });
       }
     });
 
     next();
   });
 
+  // ─── Health check (public: outside auth and the /api rate limiter) ───
+  // /healthz is intentionally NOT under /api so the global rate limiter never
+  // throttles orchestrator / load-balancer probes. It performs a trivial
+  // awaited storage read so the status reflects real DB readiness. No secrets
+  // are ever returned.
+  app.get("/healthz", async (_req, res) => {
+    const payload: {
+      status: "ok" | "degraded";
+      uptime: number;
+      timestamp: string;
+      db: "up" | "down";
+    } = {
+      status: "ok",
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+      db: "up",
+    };
+
+    try {
+      await storage.getSchools();
+    } catch {
+      payload.status = "degraded";
+      payload.db = "down";
+    }
+
+    return res.status(payload.status === "ok" ? 200 : 503).json(payload);
+  });
+
   await registerRoutes(httpServer, app);
 
-  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
 
     console.error("Internal Server Error:", err);
+
+    // Optional error-tracking hook (no-op unless SENTRY_DSN / ERROR_WEBHOOK is
+    // configured). Fire-and-forget so a failing sink never blocks the response.
+    void reportError(err, {
+      requestId: req.requestId,
+      method: req.method,
+      path: req.path,
+    });
 
     if (res.headersSent) {
       return next(err);

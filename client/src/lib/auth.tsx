@@ -30,7 +30,7 @@ interface AuthContextType {
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string, schoolId?: number) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 export const AuthContext = createContext<AuthContextType | null>(null);
@@ -78,9 +78,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [setAuthState]);
 
-  const logout = useCallback(() => {
-    setAuthState(null, null);
-    queryClient.clear();
+  const logout = useCallback(async () => {
+    // Best-effort server-side revocation before clearing local state. If the
+    // call fails (offline, already-expired token, etc.) we still clear the
+    // local token so the user is logged out client-side regardless.
+    try {
+      await apiRequest("POST", "/api/auth/logout");
+    } catch {
+      // ignore - local logout proceeds regardless
+    } finally {
+      setAuthState(null, null);
+      queryClient.clear();
+    }
   }, [setAuthState]);
 
   return (

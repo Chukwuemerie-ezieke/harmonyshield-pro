@@ -434,16 +434,44 @@ certbot renew --dry-run
 
 ### Health Check
 
-The app exposes a status endpoint:
+The app exposes a public, unauthenticated health endpoint that is intentionally
+served outside `/api` (so it is never throttled by the API rate limiter) and
+performs a lightweight database readiness check:
+
 ```bash
-curl https://your-domain.com/api/live/status
+curl https://your-domain.com/healthz
+# -> 200 {"status":"ok","uptime":123.4,"timestamp":"...","db":"up"}
+# -> 503 {"status":"degraded",...,"db":"down"} if the DB is unreachable
 ```
 
+Use `/healthz` for load-balancer / orchestrator liveness and readiness probes.
+It never returns secrets. (The live-feed status is a separate concern - see
+`GET /api/feeds/status`.)
+
 ### Logs
+
+The server emits **structured JSON** request logs (one line per `/api` request)
+with `timestamp`, `method`, `path`, `status`, `durationMs` and a per-request
+`requestId` (also returned to clients in the `X-Request-Id` response header).
+Response bodies are never logged, so JWTs and passwords from `/api/auth/*` are
+not leaked into the logs.
 
 - **Railway/Render**: Check the dashboard logs
 - **VPS with PM2**: `pm2 logs harmonyshield-pro`
 - **VPS Nginx**: `tail -f /var/log/nginx/access.log`
+
+### Optional error tracking
+
+Unhandled errors flow through a single hook that is a **no-op by default**.
+Set either of these environment variables to enable reporting:
+
+- `ERROR_WEBHOOK` - a URL that receives a JSON `POST` per unhandled error
+  (`{ message, stack, context, timestamp }`, no secrets). Delivery is
+  best-effort and failures never affect the response.
+- `SENTRY_DSN` - when set, errors are emitted as structured JSON log lines
+  tagged for a log drain / Sentry sidecar to forward. (No Sentry SDK is bundled;
+  add it to `package.json` and the esbuild allowlist in `script/build.ts` if you
+  want native delivery.)
 
 ### Database Backup (SQLite)
 
@@ -503,7 +531,7 @@ echo $NODE_ENV
 - RSS feeds work without any API keys
 - OTX: check that `OTX_API_KEY` is valid (or it falls back to public API)
 - AbuseIPDB: without a key, IP checks return simulated data
-- Check the feed status: `GET /api/live/status`
+- Check the feed status: `GET /api/feeds/status`
 
 ### SQLite "database is locked" errors
 
@@ -533,7 +561,8 @@ Before going live, verify:
 
 - [ ] `JWT_SECRET` is set to a unique, long random string (not the default)
 - [ ] `NODE_ENV` is set to `production`
-- [ ] Live feeds are working (`/api/live/status`)
+- [ ] Health check responds (`GET /healthz` returns 200)
+- [ ] Live feeds are working (`/api/feeds/status`)
 - [ ] Login works with demo credentials
 - [ ] SSL certificate is active (HTTPS)
 - [ ] Custom domain is configured (if applicable)

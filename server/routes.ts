@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { z } from "zod";
 import { storage } from "./storage";
-import { hashPassword, verifyPassword, generateToken, verifyToken, authMiddleware } from "./auth";
+import { hashPassword, verifyPassword, generateToken, verifyToken, authMiddleware, hasActiveSession } from "./auth";
 import { requireRole, verifyOwnership } from "./authz";
 import { validateBody } from "./validate";
 import { fetchLiveNews, fetchOTXThreats, checkIPReputation, getFeedStatus } from "./live-feeds";
@@ -56,6 +56,10 @@ const trainingProgressSchema = z.object({
 
 // PUT /api/settings - a school admin may edit their own school's details.
 const updateSettingsSchema = insertSchoolSchema.partial();
+
+// Session lifetime. Must match the JWT expiry in server/auth.ts (7 days) so a
+// session row never outlives the signature it guards.
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // POST /api/auth/register - admin-only. The creating admin's schoolId is
 // forced server-side; role is constrained to a safe allowlist and defaults to
@@ -564,6 +568,19 @@ export async function registerRoutes(
       }
 
       const token = generateToken(user.id, user.email, user.schoolId, user.role);
+      const decoded = verifyToken(token);
+
+      // Persist a server-side session keyed by the token's jti so the token
+      // can be revoked on logout. The sessions.token column stores the jti
+      // (an opaque identifier), never the raw JWT.
+      if (decoded) {
+        const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+        await storage.createSession({
+          userId: user.id,
+          token: decoded.jti,
+          expiresAt,
+        });
+      }
 
       // Log the login
       await storage.createAuditEntry({
@@ -637,6 +654,11 @@ export async function registerRoutes(
       return res.status(401).json({ message: "Invalid token" });
     }
 
+    // Honor server-side revocation: a logged-out token must not resolve a user.
+    if (!(await hasActiveSession(decoded.jti))) {
+      return res.status(401).json({ message: "Session expired or revoked" });
+    }
+
     const user = await storage.getUser(decoded.id);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
@@ -649,6 +671,44 @@ export async function registerRoutes(
   // ═══════════════════════════════════════════════════
   // PROTECTED ROUTES (require authMiddleware)
   // ═══════════════════════════════════════════════════
+
+  // ─── Auth: Logout ──────────────────────────────────
+  // Revoke the current token server-side by deleting its session row. After
+  // this call the same bearer token is rejected by authMiddleware (401).
+  app.post("/api/auth/logout", authMiddleware, async (req, res) => {
+    try {
+      const jti = req.user!.jti;
+      await storage.deleteSession(jti);
+      await storage.createAuditEntry({
+        schoolId: req.user!.schoolId,
+        userId: req.user!.id,
+        action: "user_logout",
+        entityType: "user",
+        entityId: req.user!.id,
+        details: `Logout from ${req.ip}`,
+      });
+      return res.json({ message: "Logged out" });
+    } catch (err) {
+      console.error("Logout error:", err);
+      return res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  // ─── Auth: List current user's active sessions ─────
+  app.get("/api/auth/sessions", authMiddleware, async (req, res) => {
+    try {
+      const current = await storage.getSession(req.user!.jti);
+      // Only the current session is addressable by jti; expose a minimal,
+      // secret-free view (never the jti/token value itself).
+      const result = current
+        ? [{ userId: current.userId, createdAt: current.createdAt, expiresAt: current.expiresAt, current: true }]
+        : [];
+      return res.json({ sessions: result });
+    } catch (err) {
+      console.error("Sessions error:", err);
+      return res.status(500).json({ message: "Internal server error" });
+    }
+  });
 
   // ─── Dashboard ─────────────────────────────────────
   app.get("/api/dashboard", authMiddleware, async (req, res) => {

@@ -138,7 +138,7 @@ export function AppSidebar() {
               size="icon"
               data-testid="button-logout"
               className="flex-shrink-0 text-sidebar-foreground/50 hover:text-sidebar-foreground hover:bg-sidebar-accent h-8 w-8"
-              onClick={logout}
+              onClick={() => { void logout(); }}
             >
               <LogOut className="w-4 h-4" />
             </Button>

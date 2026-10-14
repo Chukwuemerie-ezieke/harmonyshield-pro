@@ -1,6 +1,8 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { randomUUID } from "crypto";
 import type { Request, Response, NextFunction } from "express";
+import { storage } from "./storage";
 
 const JWT_EXPIRY = "7d";
 const MIN_JWT_SECRET_LENGTH = 32;
@@ -51,13 +53,28 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
   return bcrypt.compare(password, hash);
 }
 
-export function generateToken(userId: number, email: string, schoolId: number, role: string): string {
-  return jwt.sign({ id: userId, email, schoolId, role }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+export interface TokenPayload {
+  id: number;
+  email: string;
+  schoolId: number;
+  role: string;
+  jti: string;
 }
 
-export function verifyToken(token: string): { id: number; email: string; schoolId: number; role: string } | null {
+/**
+ * Generate a signed JWT with a unique `jti` claim. The jti is the server-side
+ * session identifier: a matching, non-revoked row must exist in the sessions
+ * table for the token to be accepted by authMiddleware. The caller is expected
+ * to persist a session row keyed by this jti (see POST /api/auth/login).
+ */
+export function generateToken(userId: number, email: string, schoolId: number, role: string): string {
+  const jti = randomUUID();
+  return jwt.sign({ id: userId, email, schoolId, role, jti }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+}
+
+export function verifyToken(token: string): TokenPayload | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as { id: number; email: string; schoolId: number; role: string };
+    return jwt.verify(token, JWT_SECRET) as TokenPayload;
   } catch {
     return null;
   }
@@ -67,17 +84,31 @@ export function verifyToken(token: string): { id: number; email: string; schoolI
 declare global {
   namespace Express {
     interface Request {
-      user?: {
-        id: number;
-        email: string;
-        schoolId: number;
-        role: string;
-      };
+      user?: TokenPayload;
     }
   }
 }
 
-export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
+/**
+ * Verify that a non-revoked, non-expired session row exists for a token's jti.
+ * Returns true only when the session is present AND not past its expiry.
+ */
+export async function hasActiveSession(jti: string | undefined): Promise<boolean> {
+  if (!jti) return false;
+  const session = await storage.getSession(jti);
+  if (!session) return false;
+  if (session.expiresAt) {
+    const expires = new Date(session.expiresAt).getTime();
+    if (!Number.isNaN(expires) && expires <= Date.now()) {
+      // Session has expired - treat as revoked and clean it up best-effort.
+      await storage.deleteSession(jti).catch(() => undefined);
+      return false;
+    }
+  }
+  return true;
+}
+
+export async function authMiddleware(req: Request, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     res.status(401).json({ message: "Authentication required" });
@@ -89,6 +120,14 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 
   if (!decoded) {
     res.status(401).json({ message: "Invalid or expired token" });
+    return;
+  }
+
+  // Signature is valid, but the token is only honored while a matching session
+  // row exists. Logging out deletes the row, which revokes the token.
+  const active = await hasActiveSession(decoded.jti);
+  if (!active) {
+    res.status(401).json({ message: "Session expired or revoked" });
     return;
   }
 
