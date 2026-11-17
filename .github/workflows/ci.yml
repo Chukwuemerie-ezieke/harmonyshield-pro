@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: havona
+          POSTGRES_PASSWORD: havona
+          POSTGRES_DB: havonashield
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U havona" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://havona:havona@localhost:5432/havonashield
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run check
+      - name: Build
+        run: npm run build
+      - name: Prepare database
+        run: |
+          npm run db:migrate
+          npm run db:seed
+          npm run db:seed-demo
+          npm run school:create -- --name "CI School" --admin-email ci-admin@test.ng --admin-name "CI Admin" | tee school.txt
+          echo "TEST_ADMIN_PASSWORD=$(grep 'Temporary password' school.txt | awk '{print $3}')" >> "$GITHUB_ENV"
+      - name: Start worker
+        run: |
+          cp .dev.vars.example .dev.vars
+          npx wrangler dev --port 8787 --ip 127.0.0.1 --local-upstream 127.0.0.1:8787 > wrangler.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/api/health && break; sleep 2; done
+      - name: API tests
+        env:
+          TEST_ADMIN_EMAIL: ci-admin@test.ng
+          BASE_URL: http://127.0.0.1:8787
+        run: npm test
+      - name: Worker logs
+        if: failure()
+        run: cat wrangler.log

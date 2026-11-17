@@ -1,6 +1,6 @@
-# HarmonyShield Pro — EdTech Cybersecurity Suite
+# HavonaShield — Cybersecurity & NDPR Compliance for Nigerian Schools
 
-**HarmonyShield Pro** is a comprehensive cybersecurity compliance and threat management platform built specifically for Nigerian educational institutions. It helps schools achieve and maintain compliance with the **Nigeria Data Protection Regulation (NDPR)** while providing real-time threat monitoring, incident response workflows, and staff cybersecurity training — all through one unified dashboard.
+**HavonaShield** ([havonashield.tech](https://havonashield.tech)) is a comprehensive cybersecurity compliance and threat management platform built specifically for Nigerian educational institutions. It helps schools achieve and maintain compliance with the **Nigeria Data Protection Regulation (NDPR)** while providing real-time threat monitoring, incident response workflows, and staff cybersecurity training — all through one unified dashboard.
 
 > Developed by **Harmony Digital Consults Ltd**
 
@@ -8,9 +8,9 @@
 
 ## What It Does
 
-HarmonyShield Pro addresses the growing cybersecurity challenges facing Nigerian schools. It provides:
+HavonaShield addresses the growing cybersecurity challenges facing Nigerian schools. It provides:
 
-- **NDPR Compliance Management** — Track and manage all 12 NDPR compliance requirements with weighted scoring, evidence uploads, and deadline tracking. Each school gets a real-time compliance score out of 100%.
+- **NDPR Compliance Management** — Track and manage 15 NDPR compliance controls with weighted scoring and deadline tracking. Each school gets a real-time compliance score out of 100%.
 
 - **Real-Time Threat Monitoring** — Live feeds from verified cybersecurity sources (The Hacker News, BleepingComputer, Dark Reading, Krebs on Security) combined with threat intelligence from AlienVault OTX and IP reputation checks via AbuseIPDB.
 
@@ -20,7 +20,7 @@ HarmonyShield Pro addresses the growing cybersecurity challenges facing Nigerian
 
 - **Multi-School Administration** — Manage multiple schools from a single platform. Each school has isolated data with its own compliance scores, incidents, and user accounts.
 
-- **Role-Based Access Control** — Four user roles (Admin, DPO, Staff, Teacher) with JWT-based authentication and scoped data access per school.
+- **Role-Based Access Control** — Four user roles (Admin, DPO, Staff, Teacher) with token-based authentication and strict per-school data isolation.
 
 - **Audit Logging** — Every significant action is logged with timestamps, user identity, and entity references for compliance audits.
 
@@ -46,217 +46,65 @@ HarmonyShield Pro addresses the growing cybersecurity challenges facing Nigerian
 
 | Layer | Technology |
 |-------|------------|
-| **Frontend** | React 18, TypeScript, Tailwind CSS, shadcn/ui, Recharts |
-| **Backend** | Express 5, Node.js, TypeScript |
-| **Database** | SQLite (via better-sqlite3) — PostgreSQL-ready schema via Drizzle ORM |
-| **Auth** | JWT (jsonwebtoken) + bcryptjs password hashing |
-| **Live Feeds** | RSS Parser, AlienVault OTX API, AbuseIPDB API |
-| **Build** | Vite 7, esbuild, tsx |
-| **ORM** | Drizzle ORM with Zod validation |
+| **Frontend** | React 18, TypeScript, Tailwind CSS, shadcn/ui, Recharts, TanStack Query |
+| **Backend** | Hono on **Cloudflare Workers** |
+| **Database** | PostgreSQL via **Cloudflare Hyperdrive**, Drizzle ORM + migrations |
+| **Auth** | HS256 JWT (12h, revocable), PBKDF2-SHA256 password hashing (WebCrypto) |
+| **Scheduling** | Cloudflare Cron Triggers (live feeds refresh every 15 min) |
+| **Validation** | Zod schemas shared by client and server |
 
----
+## Domains
 
-## Pages
+| URL | Purpose |
+|-----|---------|
+| https://havonashield.tech | Landing page |
+| https://app.havonashield.tech | Application |
+| https://demo.havonashield.tech | One-click read-only demo |
 
-| Page | Description |
-|------|-------------|
-| **Login** | JWT authentication with email/password, demo credentials helper |
-| **Dashboard** | Overview cards (compliance score, active threats, incidents, training), charts, live news feed |
-| **Compliance** | NDPR compliance checklist with status tracking, weighted scoring, progress bar |
-| **Threat Monitor** | Live threat feed from OTX, severity filtering, IP reputation checker, education-sector flagging |
-| **Training** | Course catalog with descriptions, quizzes, progress tracking per user |
-| **Incident Response** | Report incidents, 6-step workflow, action items, affected systems tracking |
-| **Reports** | Compliance trends, incident summaries, training analytics, exportable data |
-| **Settings** | School profile, user management, feed API key configuration, system preferences |
+## Roles
 
----
+| Capability | Admin | DPO | Teacher / Staff |
+|---|:-:|:-:|:-:|
+| View dashboard, compliance, threats, incidents, training | ✓ | ✓ | ✓ |
+| Report incidents, take courses | ✓ | ✓ | ✓ |
+| Update compliance status, manage incidents & actions | ✓ | ✓ | |
+| View team list and audit log | ✓ | ✓ | |
+| Add/deactivate users, change roles, edit school profile | ✓ | | |
 
-## Database Schema (11 Tables)
-
-| Table | Purpose |
-|-------|---------|
-| `schools` | School profiles with NDPC registration |
-| `users` | User accounts with bcrypt-hashed passwords |
-| `sessions` | JWT session tokens |
-| `compliance_items` | NDPR compliance checklist per school |
-| `threats` | Stored threat intelligence records |
-| `incidents` | Security incident reports |
-| `incident_actions` | Actions taken during incident response |
-| `training_courses` | Cybersecurity course catalog |
-| `training_progress` | Per-user course completion tracking |
-| `news_articles` | Cached cybersecurity news |
-| `audit_log` | System-wide audit trail |
-
----
+Schools are onboarded by the platform operator (`npm run school:create`); there is no public self-registration.
 
 ## Live Data Feeds
 
-| Feed | Source | API Key Required |
-|------|--------|-----------------|
-| **Cybersecurity News** | The Hacker News, BleepingComputer, Dark Reading, Krebs on Security (RSS) | No — free, public RSS feeds |
-| **Threat Intelligence** | AlienVault OTX (public activity feed) | Optional — enhances results with subscribed pulses |
-| **IP Reputation** | AbuseIPDB | Yes — free tier available (1,000 checks/day) |
+| Feed | Source | Key |
+|------|--------|-----|
+| Security news | The Hacker News, BleepingComputer, Dark Reading, Krebs on Security (RSS) | none |
+| Threat intelligence | AlienVault OTX | `OTX_API_KEY` (free) |
+| IP reputation | AbuseIPDB | `ABUSEIPDB_API_KEY` (free tier) |
 
-All feeds use a **15-minute server-side cache** to minimize API calls and improve response times.
-
----
-
-## Quick Start
-
-```bash
-# Clone the repository
-git clone https://github.com/Chukwuemerie-ezieke/harmonyshield-pro.git
-cd harmonyshield-pro
-
-# Install dependencies
-npm install
-
-# Create environment file
-cp .env.example .env
-# Edit .env with your values (see below)
-
-# Start development server
-npm run dev
-```
-
-The app will be running at `http://localhost:5000`.
-
-### Demo Credentials
-
-| Email | Password | Role | School |
-|-------|----------|------|--------|
-| admin@fgcenugu.edu.ng | demo123 | Admin | Federal Government College Enugu |
-| dpo@queenscollege.edu.ng | demo123 | DPO | Queens College Lagos |
-| teacher@kbc.edu.ng | demo123 | Teacher | Kings British College Abuja |
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `JWT_SECRET` | Yes (for production) | Secret key for signing JWT tokens. Use a long random string |
-| `OTX_API_KEY` | No | AlienVault OTX API key — enhances threat feeds. Get one free at [otx.alienvault.com](https://otx.alienvault.com) |
-| `ABUSEIPDB_API_KEY` | No | AbuseIPDB API key — enables live IP reputation checks. Get one free at [abuseipdb.com](https://www.abuseipdb.com) |
-| `PORT` | No | Server port (defaults to 5000) |
-| `NODE_ENV` | No | `development` or `production` |
-
----
-
-## Production Build
-
-```bash
-# Build frontend + backend
-npm run build
-
-# Start production server
-npm start
-```
-
-This compiles the React frontend into static assets and bundles the Express server into `dist/index.cjs`.
-
----
-
-## PostgreSQL Migration
-
-The app currently runs on SQLite for simplicity and zero-config setup. The schema is designed for easy migration to PostgreSQL:
-
-1. **`shared/schema.ts`** already contains full PostgreSQL types (using `pgTable`)
-2. **`server/db-schema.ts`** is the SQLite mirror used at runtime
-3. To migrate: install `pg` driver, update `server/storage.ts` to use `drizzle-orm/node-postgres`, and point imports to `shared/schema.ts`
-
-See the **DEPLOYMENT_GUIDE.md** for detailed PostgreSQL migration steps.
-
----
+Sample threats/news shown in the demo are illustrative, are clearly labelled **Sample**, and are never shown to real schools.
 
 ## Project Structure
 
 ```
-harmonyshield-pro/
-├── client/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── app-sidebar.tsx      # Navigation sidebar with user info + logout
-│   │   │   └── ui/                  # shadcn/ui components
-│   │   ├── lib/
-│   │   │   ├── auth.tsx             # Auth context provider + hooks
-│   │   │   ├── queryClient.ts       # TanStack Query + API request helper
-│   │   │   └── utils.ts             # Utility functions
-│   │   ├── pages/
-│   │   │   ├── login.tsx            # Login page with demo credentials
-│   │   │   ├── dashboard.tsx        # Main dashboard
-│   │   │   ├── compliance.tsx       # NDPR compliance tracker
-│   │   │   ├── threat-monitor.tsx   # Live threat monitoring
-│   │   │   ├── training.tsx         # Training courses
-│   │   │   ├── incident-response.tsx# Incident response workflow
-│   │   │   ├── reports.tsx          # Analytics and reports
-│   │   │   └── settings.tsx         # System settings
-│   │   ├── App.tsx                  # Router + auth guard
-│   │   ├── index.css                # Tailwind + theme variables
-│   │   └── main.tsx                 # React entry point
-│   └── index.html
-├── server/
-│   ├── auth.ts                      # JWT + bcrypt auth utilities
-│   ├── db-schema.ts                 # SQLite runtime schema (mirrors pg schema)
-│   ├── live-feeds.ts                # RSS, OTX, AbuseIPDB integrations
-│   ├── routes.ts                    # All API routes + seed data
-│   ├── storage.ts                   # Drizzle ORM CRUD operations
-│   ├── index.ts                     # Express server entry
-│   ├── static.ts                    # Static file serving (production)
-│   └── vite.ts                      # Vite dev server integration
-├── shared/
-│   └── schema.ts                    # PostgreSQL-typed schema (for types + future migration)
-├── .env.example                     # Environment variable template
-├── package.json
-├── tailwind.config.ts
-├── tsconfig.json
-├── vite.config.ts
-└── drizzle.config.ts
+client/           React SPA (index.html) + static landing page (landing.html) + public assets/_headers
+worker/           Cloudflare Worker: index.ts (routing, cron), routes.ts (API), auth.ts, feeds.ts, db.ts
+shared/           schema.ts (Drizzle tables + Zod validation), password.ts, seed-content.ts
+migrations/       SQL migrations generated by drizzle-kit
+script/admin.ts   CLI: migrate, seed courses, seed demo, create school
+test/             End-to-end API & security tests
+wrangler.jsonc    Cloudflare configuration (domains, Hyperdrive, cron, rate limits)
+```
+
+## Getting Started
+
+See **[DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md)** for local development and the full Cloudflare production setup.
+
+```bash
+docker compose up -d && cp .dev.vars.example .dev.vars
+npm ci && npm run db:migrate && npm run db:seed && npm run db:seed-demo
+npm run dev   # http://localhost:8787
 ```
 
 ---
 
-## API Endpoints
-
-### Authentication
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/auth/login` | Login with email + password, returns JWT |
-| GET | `/api/auth/me` | Get current user from JWT |
-
-### Dashboard & Data (all require Bearer token)
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/dashboard/stats` | Dashboard summary statistics |
-| GET | `/api/compliance` | Compliance items for user's school |
-| PATCH | `/api/compliance/:id` | Update compliance item status |
-| GET | `/api/threats` | Stored + live threats |
-| GET | `/api/incidents` | Incidents for user's school |
-| POST | `/api/incidents` | Create a new incident |
-| PATCH | `/api/incidents/:id` | Update incident status/step |
-| GET | `/api/training/courses` | Available training courses |
-| GET | `/api/training/progress` | User's training progress |
-| POST | `/api/training/progress` | Start or complete a course |
-| GET | `/api/reports/summary` | Reports data |
-| GET | `/api/settings/school` | School settings |
-
-### Live Feeds (require Bearer token)
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/live/news` | Live RSS news from 4 sources |
-| GET | `/api/live/threats` | Live OTX threat intelligence |
-| POST | `/api/live/check-ip` | Check IP reputation via AbuseIPDB |
-| GET | `/api/live/status` | Feed health status |
-
----
-
-## License
-
-MIT
-
----
-
-## Author
-
-**Harmony Digital Consults Ltd**  
-Cybersecurity consultancy specializing in NDPR compliance for Nigerian educational institutions.
+Developed by **Harmony Digital Consults Ltd**.

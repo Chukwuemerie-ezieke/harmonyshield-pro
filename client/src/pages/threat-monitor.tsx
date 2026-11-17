@@ -10,6 +10,18 @@ import {
   AlertTriangle, Radio, ExternalLink, Search, Shield, Globe, Loader2,
 } from "lucide-react";
 import { useState } from "react";
+import { useToast } from "@/hooks/use-toast";
+
+interface IPResult {
+  ip: string;
+  abuseConfidenceScore: number;
+  countryCode: string;
+  isp: string;
+  totalReports: number;
+  lastReportedAt: string | null;
+  isWhitelisted: boolean;
+  riskLevel: string;
+}
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from "recharts";
 
 const severityColors: Record<string, string> = {
@@ -34,11 +46,13 @@ export default function ThreatMonitor() {
     queryKey: ["/api/threats/stats"],
   });
 
+  const { toast } = useToast();
   const ipCheckMutation = useMutation({
     mutationFn: async (ip: string) => {
-      const res = await apiRequest("GET", `/api/ip-check/${ip}`);
-      return res.json();
+      const res = await apiRequest("GET", `/api/ip-check/${encodeURIComponent(ip)}`);
+      return (await res.json()) as IPResult;
     },
+    onError: (err: Error) => toast({ title: "IP check failed", description: err.message, variant: "destructive" }),
   });
 
   const allThreats = threats || [];
@@ -153,6 +167,9 @@ export default function ThreatMonitor() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap mb-1">
                         <h3 className="text-sm font-medium">{threat.title}</h3>
+                        {threat.isSample && (
+                          <Badge variant="outline" className="text-[10px] border-amber-300 text-amber-700 dark:text-amber-300">Sample</Badge>
+                        )}
                         {threat.isLive && (
                           <span className="flex items-center gap-1 text-[10px] font-medium text-primary">
                             <Radio className="w-3 h-3" /> LIVE

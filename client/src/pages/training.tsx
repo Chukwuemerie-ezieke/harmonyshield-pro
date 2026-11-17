@@ -23,7 +23,7 @@ export default function Training() {
   const [selectedCourseId, setSelectedCourseId] = useState<number | null>(params?.id ? Number(params.id) : null);
   const [quizMode, setQuizMode] = useState(false);
   const [answers, setAnswers] = useState<Record<number, number>>({});
-  const [quizResult, setQuizResult] = useState<{ score: number; passed: boolean } | null>(null);
+  const [quizResult, setQuizResult] = useState<{ score: number; passed: boolean; correctAnswers: number[] } | null>(null);
 
   const { data: courses, isLoading } = useQuery<any[]>({
     queryKey: ["/api/training/courses"],
@@ -63,28 +63,31 @@ export default function Training() {
     setQuizResult(null);
   };
 
+  const submitQuizMutation = useMutation({
+    mutationFn: async ({ courseId, answers }: { courseId: number; answers: (number | null)[] }) => {
+      const res = await apiRequest("POST", `/api/training/courses/${courseId}/submit`, { answers });
+      return (await res.json()) as { score: number; passed: boolean; correctAnswers: number[] };
+    },
+    onSuccess: (result) => {
+      setQuizResult(result);
+      queryClient.invalidateQueries({ queryKey: ["/api/training/progress"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+      toast({
+        title: result.passed ? "Congratulations!" : "Keep Trying",
+        description: result.passed
+          ? `You passed with ${result.score}%! Course completed.`
+          : `You scored ${result.score}%. You need ${selectedCourse?.passMark ?? 70}% to pass.`,
+      });
+    },
+    onError: (err: Error) => toast({ title: "Could not submit quiz", description: err.message, variant: "destructive" }),
+  });
+
   const handleSubmitQuiz = () => {
     if (!selectedCourse?.quizJson) return;
-    const quiz = JSON.parse(selectedCourse.quizJson);
-    let correct = 0;
-    quiz.forEach((q: any, i: number) => {
-      if (answers[i] === q.correct) correct++;
-    });
-    const score = Math.round((correct / quiz.length) * 100);
-    const passed = score >= (selectedCourse.passMark || 70);
-    setQuizResult({ score, passed });
-
-    progressMutation.mutate({
+    const quiz = JSON.parse(selectedCourse.quizJson) as unknown[];
+    submitQuizMutation.mutate({
       courseId: selectedCourse.id,
-      status: passed ? "completed" : "in_progress",
-      score,
-    });
-
-    toast({
-      title: passed ? "Congratulations!" : "Keep Trying",
-      description: passed
-        ? `You passed with ${score}%! Course completed.`
-        : `You scored ${score}%. You need ${selectedCourse.passMark}% to pass.`,
+      answers: quiz.map((_, i) => answers[i] ?? null),
     });
   };
 
@@ -167,8 +170,9 @@ export default function Training() {
                     <div className="space-y-2">
                       {q.options.map((opt: string, oi: number) => {
                         const isSelected = answers[qi] === oi;
-                        const isCorrect = quizResult && q.correct === oi;
-                        const isWrong = quizResult && isSelected && q.correct !== oi;
+                        const correctIdx = quizResult?.correctAnswers?.[qi];
+                        const isCorrect = quizResult && correctIdx === oi;
+                        const isWrong = quizResult && isSelected && correctIdx !== oi;
 
                         return (
                           <button
@@ -204,7 +208,7 @@ export default function Training() {
               {!quizResult ? (
                 <Button
                   onClick={handleSubmitQuiz}
-                  disabled={Object.keys(answers).length < quiz.length}
+                  disabled={Object.keys(answers).length < quiz.length || submitQuizMutation.isPending}
                   data-testid="button-submit-quiz"
                 >
                   Submit Answers ({Object.keys(answers).length}/{quiz.length})
