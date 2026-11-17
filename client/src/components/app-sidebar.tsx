@@ -12,24 +12,24 @@ import {
   ChevronLeft,
   Menu,
 } from "lucide-react";
-import { useAuth } from "@/lib/auth";
+import { useAuth, type Role } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 
-const navItems = [
+const navItems: { href: string; label: string; icon: typeof LayoutDashboard; roles?: Role[] }[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/compliance", label: "NDPR Compliance", icon: ShieldCheck },
   { href: "/threats", label: "Threat Monitor", icon: AlertTriangle },
   { href: "/training", label: "Staff Training", icon: GraduationCap },
   { href: "/incidents", label: "Incidents", icon: FileWarning },
-  { href: "/reports", label: "Reports & Audit", icon: FileText },
+  { href: "/reports", label: "Reports & Audit", icon: FileText, roles: ["admin", "dpo"] },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
 export function AppSidebar() {
   const [location] = useLocation();
-  const { user, logout } = useAuth();
+  const { user, logout, hasRole } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -67,7 +67,7 @@ export function AppSidebar() {
           </div>
           {!collapsed && (
             <div className="min-w-0">
-              <h1 className="text-sm font-semibold text-sidebar-foreground truncate">HarmonyShield Pro</h1>
+              <h1 className="text-sm font-semibold text-sidebar-foreground truncate">HavonaShield</h1>
               <p className="text-[10px] text-sidebar-foreground/50 truncate">by Harmony Digital Consults</p>
             </div>
           )}
@@ -82,7 +82,7 @@ export function AppSidebar() {
 
         {/* Navigation */}
         <nav className="flex-1 p-2 space-y-0.5 overflow-y-auto">
-          {navItems.map((item) => {
+          {navItems.filter((item) => !item.roles || hasRole(...item.roles)).map((item) => {
             const isActive = location === item.href || (item.href !== "/" && location.startsWith(item.href));
             return (
               <Link

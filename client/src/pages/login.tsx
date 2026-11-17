@@ -1,88 +1,91 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
+import { BRAND } from "@/lib/brand";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Shield, Eye, EyeOff, Loader2 } from "lucide-react";
+import { Shield, Eye, EyeOff, Loader2, PlayCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
+interface PublicConfig {
+  demoAvailable: boolean;
+  appUrl: string;
+  demoUrl: string;
+}
+
 export default function Login() {
-  const { login, register, isLoading } = useAuth();
+  const { login, loginDemo, isLoading } = useAuth();
   const { toast } = useToast();
-  const [isRegister, setIsRegister] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
+
+  const { data: config } = useQuery<PublicConfig>({ queryKey: ["/api/config"], staleTime: Infinity });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     try {
-      if (isRegister) {
-        await register(name, email, password);
-        toast({ title: "Account created", description: "Welcome to HarmonyShield Pro!" });
-      } else {
-        await login(email, password);
-        toast({ title: "Welcome back", description: "Successfully logged in." });
-      }
+      await login(email, password);
+      toast({ title: "Welcome back", description: "Successfully signed in." });
     } catch (err: any) {
-      const msg = err.message?.includes("401") ? "Invalid email or password" : err.message || "Login failed";
-      setError(msg);
+      setError(err.message || "Sign in failed");
     }
   };
 
-  const fillDemo = () => {
-    setEmail("admin@fgcenugu.edu.ng");
-    setPassword("demo123");
-    setIsRegister(false);
+  const handleDemo = async () => {
+    setError("");
+    try {
+      await loginDemo();
+      toast({ title: "Welcome to the demo", description: "This is a read-only sample school." });
+    } catch (err: any) {
+      setError(err.message || "Demo unavailable");
+    }
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[hsl(217,45%,12%)] via-[hsl(217,45%,18%)] to-[hsl(217,50%,8%)] p-4">
       <div className="w-full max-w-md">
-        {/* Branding */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/20 mb-4">
+          <a href={BRAND.siteUrl} className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/20 mb-4">
             <Shield className="w-8 h-8 text-primary" />
-          </div>
-          <h1 className="text-2xl font-semibold text-white tracking-tight">HarmonyShield Pro</h1>
-          <p className="text-sm text-gray-400 mt-1">EdTech Cybersecurity Suite for Nigerian Schools</p>
+          </a>
+          <h1 className="text-2xl font-semibold text-white tracking-tight">{BRAND.name}</h1>
+          <p className="text-sm text-gray-400 mt-1">{BRAND.tagline}</p>
         </div>
+
+        {config?.demoAvailable && (
+          <Card className="border-primary/30 bg-primary/10 backdrop-blur-sm mb-4">
+            <CardContent className="p-5 text-center space-y-3">
+              <p className="text-sm text-gray-200">
+                Explore a sample school with live threat feeds, NDPR checklist, incidents and training.
+              </p>
+              <Button onClick={handleDemo} disabled={isLoading} className="w-full" data-testid="button-demo">
+                {isLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <PlayCircle className="w-4 h-4 mr-2" />}
+                Explore the demo
+              </Button>
+              <p className="text-[11px] text-gray-400">Read-only · no sign-up needed</p>
+            </CardContent>
+          </Card>
+        )}
 
         <Card className="border-white/10 bg-white/5 backdrop-blur-sm">
           <CardHeader className="pb-4">
-            <h2 className="text-lg font-medium text-white text-center">
-              {isRegister ? "Create Account" : "Sign In"}
-            </h2>
+            <h2 className="text-lg font-medium text-white text-center">Sign in to your school</h2>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
-              {isRegister && (
-                <div className="space-y-2">
-                  <Label htmlFor="name" className="text-gray-300">Full Name</Label>
-                  <Input
-                    id="name"
-                    data-testid="input-name"
-                    type="text"
-                    placeholder="Chukwuemeka Okafor"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    className="bg-white/10 border-white/20 text-white placeholder:text-gray-500"
-                    required
-                  />
-                </div>
-              )}
-
               <div className="space-y-2">
-                <Label htmlFor="email" className="text-gray-300">Email Address</Label>
+                <Label htmlFor="email" className="text-gray-300">Email address</Label>
                 <Input
                   id="email"
                   data-testid="input-email"
                   type="email"
-                  placeholder="admin@school.edu.ng"
+                  autoComplete="username"
+                  placeholder="you@school.edu.ng"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="bg-white/10 border-white/20 text-white placeholder:text-gray-500"
@@ -97,6 +100,7 @@ export default function Login() {
                     id="password"
                     data-testid="input-password"
                     type={showPassword ? "text" : "password"}
+                    autoComplete="current-password"
                     placeholder="Enter your password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
@@ -105,6 +109,7 @@ export default function Login() {
                   />
                   <button
                     type="button"
+                    aria-label={showPassword ? "Hide password" : "Show password"}
                     data-testid="toggle-password-visibility"
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-300"
                     onClick={() => setShowPassword(!showPassword)}
@@ -115,59 +120,44 @@ export default function Login() {
               </div>
 
               {error && (
-                <p className="text-sm text-red-400 bg-red-500/10 px-3 py-2 rounded-md" data-testid="text-error">
+                <p className="text-sm text-red-400 bg-red-500/10 px-3 py-2 rounded-md" role="alert" data-testid="text-error">
                   {error}
                 </p>
               )}
 
-              <Button
-                type="submit"
-                data-testid="button-submit-login"
-                className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-medium"
-                disabled={isLoading}
-              >
+              <Button type="submit" data-testid="button-submit-login" className="w-full font-medium" disabled={isLoading}>
                 {isLoading ? (
                   <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    {isRegister ? "Creating Account..." : "Signing In..."}
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Signing in...
                   </>
                 ) : (
-                  isRegister ? "Create Account" : "Sign In"
+                  "Sign in"
                 )}
               </Button>
             </form>
 
-            {/* Demo credentials */}
-            {!isRegister && (
-              <div className="mt-4 p-3 rounded-lg bg-primary/10 border border-primary/20">
-                <p className="text-xs text-gray-400 mb-1">Demo Credentials</p>
-                <button
-                  type="button"
-                  data-testid="button-fill-demo"
-                  className="text-xs text-primary hover:underline cursor-pointer"
-                  onClick={fillDemo}
-                >
-                  admin@fgcenugu.edu.ng / demo123
-                </button>
-              </div>
-            )}
-
-            {/* Toggle register/login */}
-            <div className="mt-4 text-center">
-              <button
-                type="button"
-                data-testid="button-toggle-auth-mode"
-                className="text-sm text-gray-400 hover:text-primary transition-colors"
-                onClick={() => { setIsRegister(!isRegister); setError(""); }}
-              >
-                {isRegister ? "Already have an account? Sign in" : "Need an account? Register"}
-              </button>
+            <div className="mt-5 text-center text-xs text-gray-400 space-y-2">
+              <p>
+                Accounts are created by your school administrator.
+              </p>
+              <p>
+                New school?{" "}
+                <a className="text-primary hover:underline" href={`mailto:${BRAND.contactEmail}?subject=HavonaShield%20for%20our%20school`}>
+                  Request access
+                </a>
+                {!config?.demoAvailable && config?.demoUrl && (
+                  <>
+                    {" · "}
+                    <a className="text-primary hover:underline" href={config.demoUrl}>Try the demo</a>
+                  </>
+                )}
+              </p>
             </div>
           </CardContent>
         </Card>
 
         <p className="text-center text-xs text-gray-500 mt-6">
-          Powered by Harmony Digital Consults
+          {BRAND.name} by {BRAND.company}
         </p>
       </div>
     </div>

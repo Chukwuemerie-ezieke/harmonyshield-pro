@@ -272,6 +272,9 @@ export default function Dashboard() {
               <div key={i} className="p-3 rounded-lg border bg-card hover:bg-accent/50 transition-colors">
                 <div className="flex items-center gap-2 mb-1">
                   <span className="text-[10px] font-medium text-muted-foreground">{article.source}</span>
+                  {article.isSample && (
+                    <span className="text-[10px] font-medium text-amber-700 dark:text-amber-300">SAMPLE</span>
+                  )}
                   {article.isLive && (
                     <span className="flex items-center gap-1 text-[10px] text-primary">
                       <Radio className="w-3 h-3" /> LIVE

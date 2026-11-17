@@ -7,3 +7,8 @@ vite.config.ts.*
 *.db
 *.db-shm
 *.db-wal
+
+# Cloudflare
+.dev.vars
+.wrangler/
+.env

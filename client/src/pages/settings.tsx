@@ -8,13 +8,18 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Settings, User, Building2, Bell, Link2, Save, Loader2 } from "lucide-react";
+import { User, Building2, Link2, Save, Loader2 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
+import { Badge } from "@/components/ui/badge";
+import { TeamSettings, SecuritySettings } from "@/components/team-settings";
 
 export default function SettingsPage() {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
   const { toast } = useToast();
+  const canSeeTeam = hasRole("admin", "dpo");
+  const canEditSchool = hasRole("admin") && !user?.isDemo;
+  const { data: feeds } = useQuery<FeedStatus>({ queryKey: ["/api/feeds/status"] });
 
   const { data: school, isLoading } = useQuery<any>({
     queryKey: ["/api/settings"],
@@ -27,12 +32,6 @@ export default function SettingsPage() {
   const [schoolType, setSchoolType] = useState("secondary");
   const [studentCount, setStudentCount] = useState("");
   const [ndpcRegNumber, setNdpcRegNumber] = useState("");
-
-  // Notification prefs (UI only)
-  const [emailAlerts, setEmailAlerts] = useState(true);
-  const [threatAlerts, setThreatAlerts] = useState(true);
-  const [complianceReminders, setComplianceReminders] = useState(true);
-  const [weeklyReports, setWeeklyReports] = useState(false);
 
   useEffect(() => {
     if (school) {
@@ -176,7 +175,7 @@ export default function SettingsPage() {
               />
             </div>
           </div>
-          <Button
+          {canEditSchool && <Button
             onClick={handleSave}
             disabled={updateMutation.isPending}
             data-testid="button-save-school"
@@ -184,84 +183,57 @@ export default function SettingsPage() {
           >
             {updateMutation.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
             Save Changes
-          </Button>
+          </Button>}
         </CardContent>
       </Card>
 
-      {/* Notifications */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-medium flex items-center gap-2">
-            <Bell className="w-4 h-4" /> Notifications
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium">Email Alerts</p>
-              <p className="text-xs text-muted-foreground">Receive email notifications for important events</p>
-            </div>
-            <Switch checked={emailAlerts} onCheckedChange={setEmailAlerts} data-testid="switch-email-alerts" />
-          </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium">Threat Notifications</p>
-              <p className="text-xs text-muted-foreground">Alert when new critical threats are detected</p>
-            </div>
-            <Switch checked={threatAlerts} onCheckedChange={setThreatAlerts} data-testid="switch-threat-alerts" />
-          </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium">Compliance Reminders</p>
-              <p className="text-xs text-muted-foreground">Remind about upcoming compliance deadlines</p>
-            </div>
-            <Switch checked={complianceReminders} onCheckedChange={setComplianceReminders} data-testid="switch-compliance-reminders" />
-          </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium">Weekly Reports</p>
-              <p className="text-xs text-muted-foreground">Receive a weekly security summary by email</p>
-            </div>
-            <Switch checked={weeklyReports} onCheckedChange={setWeeklyReports} data-testid="switch-weekly-reports" />
-          </div>
-        </CardContent>
-      </Card>
+      <SecuritySettings />
+
+      {canSeeTeam && <TeamSettings />}
 
       {/* Integrations */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-sm font-medium flex items-center gap-2">
-            <Link2 className="w-4 h-4" /> Integrations
+            <Link2 className="w-4 h-4" /> Threat intelligence feeds
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="p-3 rounded-lg border">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">AlienVault OTX</p>
-                <p className="text-xs text-muted-foreground">Threat intelligence feed</p>
-              </div>
-              <Badge variant="outline" className="text-[10px]">
-                {process.env.OTX_API_KEY ? "Connected" : "Not configured"}
-              </Badge>
+          <div className="p-3 rounded-lg border flex items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium">Security news (RSS)</p>
+              <p className="text-xs text-muted-foreground">{feeds?.rssFeeds.sources.join(", ")}</p>
             </div>
+            <Badge variant="outline" className="text-[10px]">{feedLabel(feeds?.rssFeeds)}</Badge>
           </div>
-          <div className="p-3 rounded-lg border">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">AbuseIPDB</p>
-                <p className="text-xs text-muted-foreground">IP reputation checking</p>
-              </div>
-              <Badge variant="outline" className="text-[10px]">
-                {process.env.ABUSEIPDB_API_KEY ? "Connected" : "Mock mode"}
-              </Badge>
+          <div className="p-3 rounded-lg border flex items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium">AlienVault OTX</p>
+              <p className="text-xs text-muted-foreground">Threat intelligence pulses{feeds?.otxThreats.hasApiKey ? " (subscribed feed)" : " (public feed)"}</p>
             </div>
+            <Badge variant="outline" className="text-[10px]">{feedLabel(feeds?.otxThreats)}</Badge>
           </div>
-          <p className="text-xs text-muted-foreground">
-            Configure API keys in environment variables to enable live integrations.
-          </p>
+          <div className="p-3 rounded-lg border flex items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium">AbuseIPDB</p>
+              <p className="text-xs text-muted-foreground">IP reputation checks</p>
+            </div>
+            <Badge variant="outline" className="text-[10px]">{feeds?.abuseIPDB.hasApiKey ? "Connected" : "Not configured"}</Badge>
+          </div>
+          <p className="text-xs text-muted-foreground">Feeds refresh automatically every 15 minutes.</p>
         </CardContent>
       </Card>
     </div>
   );
+}
+
+interface FeedStatus {
+  rssFeeds: { status: string; lastUpdate: string | null; sources: string[] };
+  otxThreats: { status: string; lastUpdate: string | null; hasApiKey: boolean };
+  abuseIPDB: { hasApiKey: boolean };
+}
+
+function feedLabel(f?: { status: string; lastUpdate: string | null }) {
+  if (!f || f.status !== "active" || !f.lastUpdate) return "Waiting for first refresh";
+  return `Updated ${new Date(f.lastUpdate).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }

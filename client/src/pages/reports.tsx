@@ -53,7 +53,7 @@ export default function Reports() {
     { name: "Not Started", count: statusCounts.not_started, fill: "hsl(217, 20%, 60%)" },
   ];
 
-  const seedThreats = threats?.filter(t => !t.isLive) || [];
+  const seedThreats = threats || [];
   const threatsBySeverity = [
     { name: "Critical", count: seedThreats.filter(t => t.severity === "critical").length, fill: "hsl(0, 84%, 42%)" },
     { name: "High", count: seedThreats.filter(t => t.severity === "high").length, fill: "hsl(25, 95%, 53%)" },

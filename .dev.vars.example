@@ -1,0 +1,10 @@
+# Local secrets for `wrangler dev` — copy to .dev.vars
+JWT_SECRET=dev-only-secret-change-me-0123456789abcdef
+OTX_API_KEY=
+ABUSEIPDB_API_KEY=
+# Treat localhost as the demo host locally so the "Explore demo" button works
+DEMO_HOSTS=localhost,127.0.0.1
+MARKETING_HOST=
+APP_URL=http://localhost:5173
+DEMO_URL=http://localhost:5173
+ENVIRONMENT=development
